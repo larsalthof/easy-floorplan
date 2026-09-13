@@ -356,29 +356,49 @@ was rotated (issue #280).
 
 ![The same sensor at every rotation: before, the cone stays pointing up the screen while the wall moves; after, it follows the wall](img/ripple-direction-rotation.png)
 
-## Isometric view
+<a id="isometric-view"></a>
 
-The same plan, seen from a corner, with the walls standing up on it:
+## 3D view
+
+Choose **Project → Display → View → 3D isometric** to see the plan from a corner.
+The editor stays flat; all stored coordinates and entity bindings stay the same.
 
 ```yaml
-type: custom:easy-floorplan-card
-projection: iso   # the flat plan is `plan`, and the default
-wallHeight: 60    # canvas units; a maquette's cut-down wall, not a real one
+view: 3d          # 2d is the default
+wallHeight: 60    # canvas units, adjustable from 0 to 400
+wallOpacity: 0.65 # 0 = invisible, 1 = solid (default)
+rotation: 90     # optional: choose the viewing corner
 ```
 
-- **Nothing is stored differently.** Walls, rooms and devices keep their plan
-  coordinates; `projection` only changes how they are drawn, exactly as `rotation`
-  does. The editor always shows the plan as drawn, flat.
-- **Walls** are extruded to `wallHeight`, cut at their doors, and lowered to a sill
-  with a pane of glass under their windows. **Furniture** stands as a block with its
-  usual glyph on top. Rooms, light pools, sunlight and the background image lie on
-  the floor.
-- **Badges and labels stay upright** and screen-sized, as under rotation, and sit
-  where their device sits on the floor.
-- It composes with `rotation` — rotate first to choose which corner is nearest,
-  then project — and with the skins: the faces take the skin's wall colour.
-- A tall `wallHeight` hides the rooms behind the walls in front of them. The default
-  is short on purpose; raise it for a dollhouse, lower it for a plan with relief.
+The prototype's `projection: iso` still works. An explicit `view` takes precedence;
+selecting a view in the editor removes the old alias.
+
+- Walls stand above the floor and leave gaps for doors and windows. Swinging leaves,
+  sliding panels, roll-up curtains and awning windows now stand in those gaps and
+  update with their entities, including partial positions, independent second leaves,
+  and external shutters. The same opening actions work in either view.
+- Furniture stands as a block with its usual glyph on top. Furniture actions and
+  staircase navigation continue to work.
+- Rooms, light pools, direct sunlight, ambient daylight and background images stay
+  on the floor. Lighting reads the same opening/shutter state in both views,
+  including during history replay. This is floor lighting, not a simulation of
+  light striking the vertical faces.
+- Badges and labels stay upright. Their positions follow the projected floor,
+  including on narrow cards and after rotation. Room zoom reserves space for wall
+  tops, and the canvas includes a margin for wall caps at its edges.
+- Lower **Wall height** or **Wall opacity** to reveal more of a room. Height remains
+  a fixed 60 canvas units by default while we experiment with different plan sizes.
+  Zero height gives an isometric floor with the flat opening symbols.
+
+This remains an isometric 2.5D view. Panels currently update directly to their new
+positions; smooth motion between states is a follow-up. Depth ordering uses a
+painter's sort and can misorder diagonal walls or large objects. Furniture still
+uses a shared height. Pin-shaped device markers and per-symbol heights are also
+follow-ups.
+
+For a local preview with simulated entities and view, height, opacity and state
+controls, see [the development preview](../docker/README.md#3d-development-preview).
+
 ## Styling hooks (card-mod)
 
 Every rendered element carries its config `id` as `data-id`, plus a type class, so

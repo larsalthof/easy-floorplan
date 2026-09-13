@@ -66,14 +66,19 @@ export interface Pt {
   y: number;
 }
 
-/** Coerce a config `projection`; anything but `iso` means the flat plan. */
+/** Accept the public 3D name and the original prototype alias. */
 export function normalizeProjection(v: unknown): PlanProjection {
-  return v === "iso" ? "iso" : "plan";
+  return v === "iso" || v === "3d" ? "iso" : "plan";
 }
 
 /** Coerce a config `wallHeight` to `0..MAX_WALL_HEIGHT`, defaulting when unset or not a number. */
 export function normalizeWallHeight(v: unknown): number {
   return Math.min(MAX_WALL_HEIGHT, Math.max(0, cssNumber(v, DEFAULT_WALL_HEIGHT)));
+}
+
+/** Wall opacity is independent of glass and furniture. */
+export function normalizeWallOpacity(v: unknown): number {
+  return Math.min(1, Math.max(0, cssNumber(v, 1)));
 }
 
 /**
@@ -89,6 +94,8 @@ export interface DisplayFrame {
   h: number;
   projection: PlanProjection;
   wallHeight: number;
+  /** Screen-space margin for wall caps at the canvas boundary. */
+  padding?: number;
 }
 
 /**
@@ -98,7 +105,7 @@ export interface DisplayFrame {
  */
 export function projectedCanvasSize(f: DisplayFrame): { w: number; h: number } {
   if (f.projection !== "iso") return { w: f.w, h: f.h };
-  return { w: (f.w + f.h) * ISO_COS, h: (f.w + f.h) * ISO_SIN + f.wallHeight };
+  return { w: (f.w + f.h) * ISO_COS + 2 * (f.padding ?? 0), h: (f.w + f.h) * ISO_SIN + f.wallHeight + 2 * (f.padding ?? 0) };
 }
 
 /**
@@ -109,8 +116,8 @@ export function projectedCanvasSize(f: DisplayFrame): { w: number; h: number } {
 export function projectPlanPoint(x: number, y: number, f: DisplayFrame, z = 0): Pt {
   if (f.projection !== "iso") return { x, y };
   return {
-    x: (x - y) * ISO_COS + f.h * ISO_COS,
-    y: (x + y) * ISO_SIN + f.wallHeight - z,
+    x: (x - y) * ISO_COS + f.h * ISO_COS + (f.padding ?? 0),
+    y: (x + y) * ISO_SIN + f.wallHeight - z + (f.padding ?? 0),
   };
 }
 
@@ -136,7 +143,7 @@ export function projectPlanDirection(dx: number, dy: number, f: DisplayFrame): P
 export function planProjectionTransform(f: DisplayFrame): string {
   if (f.projection !== "iso") return "";
   const n = (v: number) => String(+v.toFixed(6));
-  return `matrix(${n(ISO_COS)} ${n(ISO_SIN)} ${n(-ISO_COS)} ${n(ISO_SIN)} ${n(f.h * ISO_COS)} ${n(f.wallHeight)})`;
+  return `matrix(${n(ISO_COS)} ${n(ISO_SIN)} ${n(-ISO_COS)} ${n(ISO_SIN)} ${n(f.h * ISO_COS + (f.padding ?? 0))} ${n(f.wallHeight + (f.padding ?? 0))})`;
 }
 
 /**
@@ -168,7 +175,7 @@ export function elevationShift(z: number, rot: number): Pt {
 
 // ---- standing geometry ------------------------------------------------------
 
-export type IsoSolidKind = "wall" | "sill" | "glass" | "furniture";
+export type IsoSolidKind = "wall" | "sill" | "glass" | "furniture" | "panel" | "opening-hit";
 
 /** A box standing on the rotated floor — or, for glass, one pane of it. */
 export interface IsoSolid {
@@ -184,6 +191,11 @@ export interface IsoSolid {
   color?: string;
   /** Drawn on the top face, already positioned in the layer's frame. */
   top?: SVGTemplateResult;
+  /** Explicit raised corners for a tilted opening panel. */
+  vertices?: Array<Pt & { z: number }>;
+  glazed?: boolean;
+  /** Adjacent wall chunks share these faces; drawing them shows ribs through transparency. */
+  hiddenEdges?: number[];
 }
 
 export interface IsoWallInput {
@@ -256,7 +268,8 @@ function openingSpans(
 export function wallSolids(
   walls: readonly IsoWallInput[],
   openings: readonly IsoOpeningInput[],
-  wallHeight: number
+  wallHeight: number,
+  includeGlass = true
 ): IsoSolid[] {
   const out: IsoSolid[] = [];
   for (const w of walls) {
@@ -282,7 +295,8 @@ export function wallSolids(
       const count = Math.max(1, Math.ceil((s1 - s0) / ISO_CHUNK));
       const step = (s1 - s0) / count;
       for (let i = 0; i < count; i++) {
-        out.push({ kind, id: w.id, base: box(s0 + step * i, s0 + step * (i + 1)), z0: 0, z1 });
+        out.push({ kind, id: w.id, base: box(s0 + step * i, s0 + step * (i + 1)), z0: 0, z1,
+          hiddenEdges: [...(i < count - 1 ? [1] : []), ...(i > 0 ? [3] : [])] });
       }
     };
     const spans = openingSpans(w, openings, d, len);
@@ -292,7 +306,7 @@ export function wallSolids(
       if (s.s0 > cursor) pieces(cursor === 0 ? -half : cursor, s.s0, wallHeight, "wall");
       if (s.type === "window") {
         pieces(s.s0, s.s1, wallHeight * SILL_FRACTION, "sill");
-        out.push({
+        if (includeGlass) out.push({
           kind: "glass",
           id: w.id,
           base: [at(s.s0), at(s.s1)],
@@ -349,11 +363,14 @@ const points = (ps: readonly Pt[]) => ps.map((p) => `${fmt(p.x)},${fmt(p.y)}`).j
  * The solids, painted back to front. Ties keep their given order, so two
  * pieces of one wall never swap.
  */
-export function renderIsoSolids(solids: readonly IsoSolid[]): SVGTemplateResult {
+export function renderIsoSolids(
+  solids: readonly IsoSolid[],
+  decorate: (solid: IsoSolid, drawing: SVGTemplateResult) => SVGTemplateResult = (_s, drawing) => drawing
+): SVGTemplateResult {
   const order = solids
     .map((s, i) => ({ s, i, depth: solidDepth(s) }))
     .sort((a, b) => a.depth - b.depth || a.i - b.i);
-  return svg`<g class="fp-iso">${order.map(({ s }) => renderIsoSolid(s))}</g>`;
+  return svg`<g class="fp-iso">${order.map(({ s }) => decorate(s, renderIsoSolid(s)))}</g>`;
 }
 
 /**
@@ -364,10 +381,13 @@ export function renderIsoSolids(solids: readonly IsoSolid[]): SVGTemplateResult 
  */
 export function renderIsoSolid(s: IsoSolid): SVGTemplateResult {
   const id = cssIdent(s.id) ?? nothing;
-  if (s.kind === "glass") {
+  if (s.kind === "glass" || s.kind === "panel" || s.kind === "opening-hit") {
     const [a, b] = s.base;
-    return svg`<polygon class="fp-iso-glass" data-id=${id}
-                        points=${points([elevate(a, s.z0), elevate(b, s.z0), elevate(b, s.z1), elevate(a, s.z1)])} />`;
+    return svg`<polygon class=${`fp-iso-${s.kind}${s.glazed ? " fp-iso-glazed" : ""}`} data-id=${id}
+                        style=${s.color ? `--fp-iso-color:${s.color}` : nothing}
+                        points=${points(s.vertices
+                          ? s.vertices.map((p) => elevate(p, p.z))
+                          : [elevate(a, s.z0), elevate(b, s.z0), elevate(b, s.z1), elevate(a, s.z1)])} />`;
   }
   const n = s.base.length;
   let cx = 0;
@@ -378,6 +398,7 @@ export function renderIsoSolid(s: IsoSolid): SVGTemplateResult {
   }
   const faces: Array<{ pts: string; shade: number }> = [];
   for (let i = 0; i < n; i++) {
+    if (s.hiddenEdges?.includes(i)) continue;
     const a = s.base[i];
     const b = s.base[(i + 1) % n];
     // The edge's normal, turned to point away from the footprint.

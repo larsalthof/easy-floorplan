@@ -4898,7 +4898,7 @@ export function areaZoomTransform(
   const ys = rotated.map((p) => p.y);
   const minX = Math.min(...xs);
   const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
+  const minY = Math.min(...ys) - (f.projection === "iso" ? f.wallHeight : 0);
   const maxY = Math.max(...ys);
   const pad = Math.max(maxX - minX, maxY - minY) * padFrac;
   const bw = Math.max(maxX - minX + pad * 2, 1);

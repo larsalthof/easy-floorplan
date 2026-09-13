@@ -9,6 +9,7 @@ import {
   GLASS_FRACTION,
   normalizeProjection,
   normalizeWallHeight,
+  normalizeWallOpacity,
   projectedCanvasSize,
   projectPlanPoint,
   projectPlanDirection,
@@ -40,11 +41,11 @@ const flat = (w = 1000, h = 600): DisplayFrame => ({ w, h, projection: "plan", w
 const COS = Math.sqrt(3) / 2;
 
 describe("normalizeProjection", () => {
-  it("reads iso, and everything else as the flat plan", () => {
+  it("reads 3d and iso, with the flat plan as fallback", () => {
     expect(normalizeProjection("iso")).toBe("iso");
     expect(normalizeProjection("plan")).toBe("plan");
     expect(normalizeProjection(undefined)).toBe("plan");
-    expect(normalizeProjection("3d")).toBe("plan");
+    expect(normalizeProjection("3d")).toBe("iso");
     expect(normalizeProjection(1)).toBe("plan");
   });
 });
@@ -331,5 +332,52 @@ describe("areaZoomTransform under the isometric view", () => {
       wallHeight: 0,
     });
     expect(a).toEqual(b);
+  });
+});
+
+
+describe("transparent wall geometry", () => {
+  it("only draws end caps at the ends of a wall run", () => {
+    const chunks = wallSolids([{ id: "wall", x1: 0, y1: 0, x2: 320, y2: 0, thickness: 8 }], [], 60);
+    expect(chunks[0].hiddenEdges).toEqual([1]);
+    expect(chunks[chunks.length - 1].hiddenEdges).toEqual([3]);
+    expect(chunks.slice(1, -1).every((s) => s.hiddenEdges?.length === 2)).toBe(true);
+    // A middle chunk only presents its long near face and top, never a rib.
+    const drawing = flatten(renderIsoSolids([chunks[1]]));
+    expect((drawing.match(/class="fp-iso-shade"/g) ?? []).length).toBe(1);
+  });
+  it("includes a screen margin in both the SVG transform and overlay coordinates", () => {
+    const frame = { ...iso(), padding: 14 };
+    const size = projectedCanvasSize(frame);
+    expect(size.w - projectedCanvasSize(iso()).w).toBeCloseTo(28);
+    const top = projectPlanPoint(0, 0, frame, 60);
+    expect(top.y).toBe(14);
+    const values = planProjectionTransform(frame).match(/matrix\((.*)\)/)![1].split(" ").map(Number);
+    const p = projectPlanPoint(100, 200, frame);
+    expect(values[0] * 100 + values[2] * 200 + values[4]).toBeCloseTo(p.x, 3);
+    expect(values[1] * 100 + values[3] * 200 + values[5]).toBeCloseTo(p.y, 3);
+  });
+});
+
+
+describe("3D framing and opacity", () => {
+  it("keeps the tops of tall room walls inside a fitted room zoom", () => {
+    const room = [{ x: 100, y: 100 }, { x: 400, y: 100 }, { x: 400, y: 300 }, { x: 100, y: 300 }];
+    const frame = iso(1000, 600, 200);
+    const zoom = areaZoomTransform(room, 1000, 600, 0, undefined, undefined, undefined, frame);
+    const size = projectedCanvasSize(frame);
+    for (const point of room) for (const height of [0, 200]) {
+      const p = projectPlanPoint(point.x, point.y, frame, height);
+      const y = p.y * zoom.scale + zoom.tyPercent / 100 * size.h;
+      expect(y).toBeGreaterThanOrEqual(0);
+      expect(y).toBeLessThanOrEqual(size.h);
+    }
+  });
+  it("defaults malformed opacity and clamps finite values", () => {
+    for (const value of [undefined, null, "", NaN, Infinity]) expect(normalizeWallOpacity(value)).toBe(1);
+    expect(normalizeWallOpacity(-1)).toBe(0);
+    expect(normalizeWallOpacity(0)).toBe(0);
+    expect(normalizeWallOpacity(0.45)).toBe(0.45);
+    expect(normalizeWallOpacity(2)).toBe(1);
   });
 });

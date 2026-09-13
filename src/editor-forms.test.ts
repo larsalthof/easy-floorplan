@@ -1220,6 +1220,7 @@ describe("wallForm / projectForm / floorImageForm", () => {
   it("rotation lives in the bottom-row display form, defaults to 0°, and patches as a number", () => {
     const form = projectDisplayForm({ type: "t", width: 1000, height: 600 } as FloorplanCardConfig);
     expect(form.fields.map((x) => x.name)).toEqual([
+      "view",
       "rotation",
       "rotationPortrait",
       "rotationLandscape",
@@ -2035,6 +2036,7 @@ describe("every field lands in exactly one panel group", () => {
     // first three under "Display" and the last under "Devices". Miss it in
     // both slices and the control silently disappears.
     const DISPLAY = [
+      "view",
       "rotation",
       "rotationPortrait",
       "rotationLandscape",
@@ -2199,5 +2201,24 @@ describe("itemGroup7aForm - showOnlyWhenZoomed", () => {
     const patch = itemGroup7aForm(on).toPatch({ showOnlyWhenZoomed: false });
     expect("showOnlyWhenZoomed" in patch).toBe(true);
     expect({ ...on, ...patch }.showOnlyWhenZoomed).toBeUndefined();
+  });
+});
+
+
+describe("3D display controls", () => {
+  const base = { type: "t", width: 1000, height: 600 } as FloorplanCardConfig;
+  it("reads the prototype alias and lets an explicit 2D selection override it", () => {
+    const form = projectDisplayForm({ ...base, projection: "iso" });
+    expect(form.data.view).toBe("3d");
+    const patch = form.toPatch({ view: "2d" });
+    expect(patch).toEqual({ view: "2d", projection: undefined });
+    expect(projectDisplayForm({ ...base, projection: "iso", ...patch }).data.view).toBe("2d");
+  });
+  it("exposes wall controls only in 3D and preserves a deliberately invisible wall", () => {
+    const form = projectDisplayForm({ ...base, view: "3d", wallHeight: 0, wallOpacity: 0 });
+    expect(form.fields.map((f) => f.name)).toEqual(expect.arrayContaining(["wallHeight", "wallOpacity"]));
+    expect(form.data).toMatchObject({ wallHeight: 0, wallOpacity: 0 });
+    expect(form.toPatch({ wallHeight: 0, wallOpacity: 0 })).toEqual({ wallHeight: 0, wallOpacity: 0 });
+    expect(projectDisplayForm(base).fields.map((f) => f.name)).not.toContain("wallHeight");
   });
 });

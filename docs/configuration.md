@@ -18,8 +18,10 @@ Back to the [README](../README.md).
 | `rotation`   | number   | `0`                | Rotate the card `90`, `180` or `270`° — a landscape plan on a portrait wall tablet. Icons and labels stay upright; the editor always shows the plan as drawn. |
 | `rotationPortrait` | number | (same as `rotation`) | Rotation to use while the **screen** is portrait, overriding `rotation`. Unset means `rotation` applies whichever way the screen is. See [Rotation that follows the screen](appearance.md#rotation-that-follows-the-screen). |
 | `rotationLandscape` | number | (same as `rotation`) | Rotation to use while the screen is landscape. The mirror of `rotationPortrait`; set either, or both. |
-| `projection` | string | `plan` | `iso` draws the same plan as an isometric elevation — the floor turned, the walls standing up on it, the furniture as blocks. Display only; the editor always shows the plan as drawn. See [Isometric view](appearance.md#isometric-view). |
-| `wallHeight` | number | `60` | How tall the walls stand under `projection: iso`, in canvas units. Ignored on the flat plan. |
+| `view` | string | `2d` | `3d` shows standing walls, openings and furniture. Display only; the editor stays flat. See [3D view](appearance.md#3d-view). |
+| `projection` | string | `plan` | Prototype alias: `iso` selects 3D when `view` is unset. |
+| `wallHeight` | number | `60` | Standing wall height in canvas units, clamped to 0–400. Ignored in 2D. |
+| `wallOpacity` | number | `1` | Standing wall opacity, clamped to 0–1. Furniture and opening panels keep their own paint. Ignored in 2D. |
 | `showDeadSpaces` | boolean | `false` | Hatch every space the walls seal off that no door or window reaches, worked out from the walls and openings themselves. See [Dead spaces](behavior.md#dead-spaces). |
 | `sunDimming` | boolean | `false` | Dim through dusk, brighten through dawn, from the HA instance's sun. See [Follow the sun](lighting.md#follow-the-sun). |
 | `sunBrightnessMin` | number | `0.45` | Brightness once the sun is fully down, 0–1. |

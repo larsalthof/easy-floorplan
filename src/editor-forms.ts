@@ -69,6 +69,7 @@ import {
   defaultSash,
   openingIsGlazed,
 } from "./render";
+import { normalizeProjection, normalizeWallHeight, normalizeWallOpacity, MAX_WALL_HEIGHT } from "./projection";
 import { defaultItemAction } from "./actions";
 import { DEFAULT_SKIN, SKINS, findSkin, MAX_SKIN_WALL_WIDTH } from "./skins";
 
@@ -1983,6 +1984,26 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
   return {
     fields: [
       {
+        name: "view",
+        label: "View",
+        helper: "3D shows standing walls and openings. Editing stays in 2D",
+        selector: dropdown(opt("2d", "2D plan"), opt("3d", "3D isometric")),
+      },
+      ...(normalizeProjection(c.view ?? c.projection) === "iso" ? [
+        {
+          name: "wallHeight",
+          label: "Wall height",
+          helper: "Canvas units. Lower walls reveal more of each room",
+          selector: { number: { min: 0, max: MAX_WALL_HEIGHT, step: 1, mode: "slider" } },
+        },
+        {
+          name: "wallOpacity",
+          label: "Wall opacity",
+          helper: "1 is solid; lower values reveal the floor behind walls",
+          selector: { number: { min: 0, max: 1, step: 0.05, mode: "slider" } },
+        },
+      ] : []),
+      {
         name: "rotation",
         label: "Rotate display",
         helper: "Rotates the live card only — editing stays as drawn",
@@ -2054,6 +2075,9 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
       },
     ],
     data: {
+      view: normalizeProjection(c.view ?? c.projection) === "iso" ? "3d" : "2d",
+      wallHeight: normalizeWallHeight(c.wallHeight),
+      wallOpacity: normalizeWallOpacity(c.wallOpacity),
       rotation: String(normalizePlanRotation(c.rotation)),
       // "" is "same as above" — the absence of an override, not an angle.
       // `== null` for the same reason resolvePlanRotation uses it: a key
@@ -2072,6 +2096,8 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
     },
     toPatch: (p) => {
       let out = p;
+      // A deliberate 2D selection must also clear the prototype alias.
+      if ("view" in out) out = { ...out, projection: undefined };
       if ("rotation" in out)
         // Stored as a number; 0 means "not rotated", so keep it out of the YAML.
         out = { ...out, rotation: out.rotation === "0" ? undefined : Number(out.rotation) };

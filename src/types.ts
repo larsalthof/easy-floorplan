@@ -1606,6 +1606,10 @@ export interface FloorplanCardConfig extends LovelaceCardConfig {
    * always shows the plan as drawn. Anything else is read as `plan`.
    */
   projection?: "plan" | "iso";
+  /** Display mode. Takes precedence over the prototype `projection` key. */
+  view?: "2d" | "3d";
+  /** Opacity of standing walls, 0..1. Default 1; ignored in 2D. */
+  wallOpacity?: number;
   /**
    * How tall the walls stand under `projection: iso`, in canvas units.
    * Default `DEFAULT_WALL_HEIGHT` (projection.ts), clamped to

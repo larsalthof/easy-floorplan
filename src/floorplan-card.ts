@@ -136,10 +136,12 @@ import {
   IDENTITY_ZOOM,
   wallThickness,
   type PlanRotation,
+  type OpeningStyle,
 } from "./render";
 import {
   normalizeProjection,
   normalizeWallHeight,
+  normalizeWallOpacity,
   projectedCanvasSize,
   projectPlanPoint,
   projectPlanDirection,
@@ -151,6 +153,7 @@ import {
   FURNITURE_HEIGHT_FRACTION,
   type DisplayFrame,
 } from "./projection";
+import { openingSolids } from "./projection-openings";
 import type { SVGTemplateResult } from "lit";
 import { symbolCatalog } from "./symbols";
 import { deadSpacesCached } from "./dead-space";
@@ -282,7 +285,7 @@ export class FloorplanCard extends LitElement {
       if (raw[key] != null && !Array.isArray(raw[key]))
         throw new Error(`Invalid configuration: "${key}" must be a list`);
     }
-    for (const key of ["width", "height", "grid", "rotation", "rotationPortrait", "rotationLandscape", "wallHeight"]) {
+    for (const key of ["width", "height", "grid", "rotation", "rotationPortrait", "rotationLandscape", "wallHeight", "wallOpacity"]) {
       if (raw[key] != null && typeof raw[key] !== "number")
         throw new Error(`Invalid configuration: "${key}" must be a number`);
     }
@@ -533,8 +536,9 @@ export class FloorplanCard extends LitElement {
     return {
       w: d.w,
       h: d.h,
-      projection: normalizeProjection(c.projection),
+      projection: normalizeProjection(c.view ?? c.projection),
       wallHeight: normalizeWallHeight(c.wallHeight),
+      padding: 2 + Math.max(WALL_THICKNESS, ...getFloors(c).flatMap((f) => f.walls.map((w) => wallThickness(w.thickness)))),
     };
   }
 
@@ -562,6 +566,50 @@ export class FloorplanCard extends LitElement {
     return projectPlanDirection(n.x, n.y, this._frame(c, rot));
   }
 
+  /** Both views read opening paint and travel through this replay-aware source. */
+  private _openingStyle(o: Opening, renderHass: RenderHass | undefined): OpeningStyle {
+    const amount = this._openingAmount(o, renderHass);
+    const shutterState = o.shutterEntity ? renderHass?.states[o.shutterEntity] : undefined;
+    return {
+      color: SKIN_WALL,
+      // The closed tone (issue #228). Absent, the moving parts stay
+      // the wall colour, which is what a closed opening always was —
+      // and that is also what an opening whose contact has dropped
+      // out falls back to, so a dead sensor does not draw the same
+      // emphatic "shut" as a door that really is (issue #162).
+      // Guarded on `hass` for the same reason the device path is:
+      // before the first states arrive every opening would read as
+      // offline and the closed colour would flash off on load.
+      inactive:
+        !!this.hass &&
+        itemIsOffline(o, o.entity ? renderHass?.states[o.entity]?.state : undefined)
+          ? undefined
+          : o.inactiveColor,
+      open: amount > 0,
+      amount,
+      active: this._openingActive(o, renderHass),
+      accent: o.activeColor ?? SKIN_ACCENT,
+      // Per-leaf state for a two-sensor biparting slider (issue #145).
+      second: this._openingSecond(o, renderHass),
+      // External roller shutter layer (issue #74). No entity bound
+      // yet → previewed shut, like a static plan.
+      shutter: o.shutterEntity
+        ? {
+            amount: shutterAmount(shutterState, o.shutterInvert),
+            active: shutterActive(shutterState, o.shutterInvert),
+            style: shutterStyleOf(o),
+            // The shutter's own accent, falling back to the
+            // opening's and then to the skin's.
+            accent: o.shutterActiveColor ?? o.activeColor ?? SKIN_ACCENT,
+            flip: o.shutterFlipV,
+            // Per-panel state for a two-contact hinged shutter
+            // (issue #159).
+            second: this._shutterSecond(o, renderHass),
+          }
+        : undefined,
+    };
+  }
+
   /**
    * The isometric view's standing geometry (issue #261): walls as extruded
    * boxes, cut at their doors and lowered to a sill under their windows, and
@@ -576,7 +624,8 @@ export class FloorplanCard extends LitElement {
     frame: DisplayFrame,
     rotTransform: string,
     drawFurniture: (f: Furniture) => SVGTemplateResult,
-    furnitureTone: (f: Furniture) => string
+    furnitureTone: (f: Furniture) => string,
+    renderHass: RenderHass | undefined
   ): SVGTemplateResult {
     const map = (x: number, y: number) => rotatePlanPoint(x, y, c.width, c.height, rot);
     const walls = active.walls.map((w) => {
@@ -589,7 +638,10 @@ export class FloorplanCard extends LitElement {
       // The rotation turns directions along with points.
       return { x: p.x, y: p.y, length: o.length, angle: o.angle + rot, type: o.type };
     });
-    const solids = wallSolids(walls, openings, frame.wallHeight);
+    const solids = wallSolids(walls, openings, frame.wallHeight, false);
+    for (const o of active.openings) {
+      solids.push(...openingSolids(o, this._openingStyle(o, renderHass), map, frame.wallHeight));
+    }
     const height = frame.wallHeight * FURNITURE_HEIGHT_FRACTION;
     // The glyph is drawn in plan coordinates, so it is lifted by the plan-space
     // shift that reads as "up" once rotated and projected.
@@ -607,7 +659,21 @@ export class FloorplanCard extends LitElement {
         )
       );
     }
-    return renderIsoSolids(solids);
+    const byId = new Map(active.openings.map((o) => [o.id, o]));
+    return renderIsoSolids(solids, (solid, drawing) => {
+      if (solid.kind !== "panel" && solid.kind !== "opening-hit") return drawing;
+      const o = byId.get(solid.id!);
+      if (!o || !openingIsPressable(o, this._featuresOf)) return drawing;
+      const target = solid.kind === "opening-hit";
+      return svg`<g class="fp-iso-opening-button"
+          role=${target ? "button" : nothing} tabindex=${target ? "0" : nothing}
+          aria-label=${target ? (o.entity ? renderHass?.states[o.entity]?.attributes?.friendly_name ?? o.entity : o.shutterEntity ?? o.type) : nothing}
+          @action=${(ev: CustomEvent<{ action: "tap" | "hold" | "double_tap" }>) => this._onOpeningAction(ev, o)}
+          .actionHandler=${actionHandler({
+            hasHold: hasAction(this._openingPress(o, "hold")?.config),
+            hasDoubleClick: hasAction(this._openingPress(o, "double_tap")?.config),
+          })}>${drawing}</g>`;
+    });
   }
 
   private _renderShutterMark(
@@ -931,10 +997,10 @@ export class FloorplanCard extends LitElement {
     // never rotated as a whole, so without this a rotated card aimed the cone
     // at a different wall than the plan does. The shutter mark's normal has
     // taken `rot` for the same reason since it existed.
-    const rippleDirection = rotatePlanAngle(
-      item.rippleDirection ?? DEFAULT_RIPPLE_DIRECTION,
-      rot
-    );
+    const bearing = rotatePlanAngle(item.rippleDirection ?? DEFAULT_RIPPLE_DIRECTION, rot);
+    const rad = bearing * Math.PI / 180;
+    const direction = this._displayDirection({ x: Math.sin(rad), y: -Math.cos(rad) }, c, rot);
+    const rippleDirection = (Math.atan2(direction.x, -direction.y) * 180 / Math.PI + 360) % 360;
     const rippleWidth = item.rippleWidth ?? DEFAULT_RIPPLE_WIDTH;
 
     // Apply visibility hidden to keep the layout space intact for the label
@@ -1178,7 +1244,7 @@ export class FloorplanCard extends LitElement {
           ${label ? svg`<title>${label}</title>` : nothing}
           ${drawn}
         </g>`;
-        };
+    };
     // The block's colour: what the glyph is drawn in, through the same allowlist.
     const furnitureTone = (f: Furniture): string =>
       furnitureColor(f, f.entity ? renderHass?.states[f.entity]?.state : undefined) ??
@@ -1311,6 +1377,7 @@ export class FloorplanCard extends LitElement {
             style="aspect-ratio: ${dims.w} / ${dims.h};
                    width: min(100%, calc(100cqh * ${dims.w} / ${dims.h}));
                    --fp-plan-w: ${dims.w};
+                   --fp-wall-opacity: ${normalizeWallOpacity(c.wallOpacity)};
                    background:${cssColorOr(c.background, SKIN_PAPER)};"
           >
           <!-- preserveAspectRatio="none" is correct here, and it took a wrong
@@ -1523,51 +1590,10 @@ export class FloorplanCard extends LitElement {
               // Unkeyed, Lit morphs floor A's openings into floor B's, and the
               // 0.5s leaf/panel transitions animate the leftover state — a
               // window briefly plays a door swing (issue #50).
-              active.openings,
+              iso && frame.wallHeight > 0 ? [] : active.openings,
               (o, i) => o.id || i,
               (o) => {
-              const amount = this._openingAmount(o, renderHass);
-              const shutterState = o.shutterEntity
-                ? renderHass?.states[o.shutterEntity]
-                : undefined;
-              const symbol = renderOpening(o, {
-                color: SKIN_WALL,
-                // The closed tone (issue #228). Absent, the moving parts stay
-                // the wall colour, which is what a closed opening always was —
-                // and that is also what an opening whose contact has dropped
-                // out falls back to, so a dead sensor does not draw the same
-                // emphatic "shut" as a door that really is (issue #162).
-                // Guarded on `hass` for the same reason the device path is:
-                // before the first states arrive every opening would read as
-                // offline and the closed colour would flash off on load.
-                inactive:
-                  !!this.hass &&
-                  itemIsOffline(o, o.entity ? renderHass?.states[o.entity]?.state : undefined)
-                    ? undefined
-                    : o.inactiveColor,
-                open: amount > 0,
-                amount,
-                active: this._openingActive(o, renderHass),
-                accent: o.activeColor ?? SKIN_ACCENT,
-                // Per-leaf state for a two-sensor biparting slider (issue #145).
-                second: this._openingSecond(o, renderHass),
-                // External roller shutter layer (issue #74). No entity bound
-                // yet → previewed shut, like a static plan.
-                shutter: o.shutterEntity
-                  ? {
-                      amount: shutterAmount(shutterState, o.shutterInvert),
-                      active: shutterActive(shutterState, o.shutterInvert),
-                      style: shutterStyleOf(o),
-                      // The shutter's own accent, falling back to the
-                      // opening's and then to the skin's.
-                      accent: o.shutterActiveColor ?? o.activeColor ?? SKIN_ACCENT,
-                      flip: o.shutterFlipV,
-                      // Per-panel state for a two-contact hinged shutter
-                      // (issue #159).
-                      second: this._shutterSecond(o, renderHass),
-                    }
-                  : undefined,
-              });
+              const symbol = renderOpening(o, this._openingStyle(o, renderHass));
               // Only an opening that answers gets a hit target — the same test
               // devices get (issue #134), so an unbound opening is not a button
               // that does nothing. A shutter-only opening does answer, which is
@@ -1613,7 +1639,7 @@ export class FloorplanCard extends LitElement {
                  stops responding (the lesson from #108). -->
             </g>
             ${iso
-              ? this._renderIsoLayer(active, c, rot, frame, rotTransform, drawFurniture, furnitureTone)
+              ? this._renderIsoLayer(active, c, rot, frame, rotTransform, drawFurniture, furnitureTone, renderHass)
               : nothing}
             <g transform=${rotTransform || nothing}>
             ${
@@ -2049,8 +2075,31 @@ export class FloorplanCard extends LitElement {
     }
     /* The isometric view (issue #261). Faces take the skin's wall colour; the
        shade laid over a side is what makes a box read as a box; a furniture
-       block keeps the paper on top so its glyph still reads. None of it takes
-       a tap — the floor underneath answers, as it does flat. */
+       block keeps the paper on top so its glyph still reads. Wall faces pass
+       taps through; opening panels and furniture keep their own actions. */
+    .fp-iso-wall polygon, .fp-iso-sill polygon { stroke: none; }
+    .fp-iso-wall, .fp-iso-sill {
+      opacity: var(--fp-wall-opacity, 1);
+    }
+    .fp-iso-panel {
+      pointer-events: none;
+      fill: var(--fp-iso-color, var(--fp-skin-wall, var(--primary-text-color, #212121)));
+      stroke: var(--fp-iso-color, var(--fp-skin-wall, var(--primary-text-color, #212121)));
+      stroke-width: 1;
+      stroke-linejoin: round;
+    }
+    .fp-iso-glazed {
+      fill: #8ec5ff;
+      fill-opacity: 0.35;
+    }
+    .fp-iso-opening-hit {
+      pointer-events: none;
+      fill: transparent;
+      stroke: none;
+    }
+    .fp-iso-opening-button { cursor: pointer; }
+    .fp-iso-opening-button > polygon { pointer-events: auto; }
+    .fp-iso-opening-button:focus-visible { outline: 2px solid var(--primary-color, #03a9f4); }
     .fp-iso-face {
       fill: var(--fp-skin-wall, var(--primary-text-color, #212121));
       stroke: var(--fp-skin-wall, var(--primary-text-color, #212121));
