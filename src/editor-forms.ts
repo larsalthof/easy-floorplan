@@ -251,7 +251,11 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
         // here would only invite drawing one. A hand-written config may still
         // set it on a door, and the card draws that honestly as a sealed
         // panel — this is about what the editor suggests, not what it allows.
-        ...(o.type === "window" ? [opt("fixed", "Fixed (does not open)")] : [])
+        // Windows only, for the same reason `fixed` is (issue #272): a
+        // top-hung sash is a window, and a top-hung door is not a thing.
+        ...(o.type === "window"
+          ? [opt("fixed", "Fixed (does not open)"), opt("awning", "Top-hinged (awning)")]
+          : [])
       ),
     },
     { name: "length", label: "Length", required: true, selector: { number: { min: 1, mode: "box" } } },
@@ -620,8 +624,8 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
         }
         else if (k === "motion") {
           const motion =
-            v === "slide" || v === "roll" || v === "fixed"
-              ? (v as "slide" | "roll" | "fixed")
+            v === "slide" || v === "roll" || v === "fixed" || v === "awning"
+              ? (v as "slide" | "roll" | "fixed" | "awning")
               : undefined;
           out.motion = motion;
           // sliderStyle only applies while sliding — drop it when switching
@@ -1167,6 +1171,13 @@ export function itemEffectsForm(it: FloorItem, deviceClass?: string): FormSpec |
 export function itemGroup7aForm(it: FloorItem): FormSpec {
   const fields: FormField[] = [
     {
+      name: "showOnlyWhenZoomed",
+      label: "Only show when zoomed into area",
+      helper:
+        "Hidden on the full plan, and shown once the room it sits in is zoomed into",
+      selector: { boolean: {} },
+    },
+    {
       name: "enableHideByEntity",
       label: "Hide by condition (Entire Object)",
       selector: { boolean: {} },
@@ -1379,6 +1390,7 @@ export function itemGroup7aForm(it: FloorItem): FormSpec {
   return {
     fields,
     data: {
+      showOnlyWhenZoomed: it.showOnlyWhenZoomed ?? false,
       enableHideByEntity: it.enableHideByEntity ?? false,
       hideEntity: it.hideEntity ?? "",
       hideAttribute: it.hideAttribute ?? "",
@@ -1406,7 +1418,20 @@ export function itemGroup7aForm(it: FloorItem): FormSpec {
       hideBadgeThreshold: it.hideBadgeThreshold ?? 0,
       hideBadgeInvert: it.hideBadgeInvert ?? false,
     },
-    toPatch: identity,
+    // Off is the default, so it leaves no key behind — an untouched device's
+    // YAML stays as short as it was before this switch existed.
+    //
+    // Only when the user actually touched it, though. `_renderForm` diffs the
+    // form against the event and passes on just the keys that changed, and
+    // `_updateItem` merges with a spread — so a key that is merely *present*
+    // and undefined overwrites what the config had. Writing it unconditionally
+    // meant every one of this group's two dozen other fields silently switched
+    // this one off. The sibling forms all prune inside a walk of
+    // `Object.entries(patch)`, which has the same guard built in.
+    toPatch: (patch) =>
+      "showOnlyWhenZoomed" in patch
+        ? { ...patch, showOnlyWhenZoomed: patch.showOnlyWhenZoomed || undefined }
+        : patch,
   };
 }
 /** Group 7: when the device is drawn at all, and what a press does. */
@@ -1562,6 +1587,28 @@ export function furnitureForm(
         helper: "Clicking this piece changes floor — for a staircase",
         selector: dropdown(opt("", "Nothing"), opt("up", "Up one floor"), opt("down", "Down one floor")),
       },
+      // Actions on the piece itself (issue #284), offered on every piece the
+      // way a room's actions are — furniture with no entity can still navigate or call
+      // a service, and requiring one first would rule that out.
+      //
+      // The tap helper names what it replaces, but only when there is
+      // something to replace: on an ordinary piece a tap does nothing today,
+      // and claiming it "replaces the floor change" would describe a staircase
+      // this piece is not.
+      {
+        name: "tap_action",
+        label: "Tap action",
+        helper: f.goToFloor
+          ? "Replaces the floor change. Put an action on hold or double-tap to keep both"
+          : undefined,
+        selector: { ui_action: { default_action: "none" } },
+      },
+      { name: "hold_action", label: "Hold action", selector: { ui_action: { default_action: "none" } } },
+      {
+        name: "double_tap_action",
+        label: "Double-tap action",
+        selector: { ui_action: { default_action: "none" } },
+      },
     ],
     data: {
       type: f.type,
@@ -1571,6 +1618,9 @@ export function furnitureForm(
       angle: f.angle ?? 0,
       entity: f.entity ?? "",
       goToFloor: f.goToFloor ?? "",
+      tap_action: f.tap_action,
+      hold_action: f.hold_action,
+      double_tap_action: f.double_tap_action,
     },
     // "" is the empty option, and means the piece is ordinary furniture.
     toPatch: (p) => ("goToFloor" in p && !p.goToFloor ? { ...p, goToFloor: undefined } : p),
@@ -2129,6 +2179,13 @@ export function projectSunForm(c: FloorplanCardConfig): FormSpec {
 export function projectReliefForm(c: FloorplanCardConfig): FormSpec {
   const fields: FormField[] = [
     {
+      name: "ambientDaylight",
+      label: "Ambient daylight",
+      helper:
+        "Soft sky light through exterior windows and open or glazed doors, even when direct sun does not hit them",
+      selector: { boolean: {} },
+    },
+    {
       name: "sunlight",
       label: "Let the sun in",
       helper:
@@ -2184,6 +2241,7 @@ export function projectReliefForm(c: FloorplanCardConfig): FormSpec {
   return {
     fields,
     data: {
+      ambientDaylight: c.ambientDaylight ?? false,
       sunlight: c.sunlight ?? false,
       sunShade: c.sunShade ?? true,
       north: c.north ?? 0,
@@ -2192,13 +2250,20 @@ export function projectReliefForm(c: FloorplanCardConfig): FormSpec {
       sunBearing: c.sunBearing ?? DEFAULT_SUN_BEARING,
     },
     toPatch: (p) => {
-      const out = { ...p };
-      // Nothing left to aim or to paint, so all of it goes — every one of
-      // these keys is read only while the light is on, and left behind they
+      let out = { ...p };
+      // Ambient daylight is an independent opt-in; false is the default and
+      // therefore stays out of YAML even when direct sunlight is also toggled.
+      if ("ambientDaylight" in out && !out.ambientDaylight)
+        out = { ...out, ambientDaylight: undefined };
+      // Nothing left to aim or to paint, so all of the direct-sun state goes —
+      // every one of these keys is read only while the light is on, and left behind they
       // would sit in the YAML meaning nothing and come back stale on
       // re-enable. The colours are set by their own rows rather than by this
       // form, which is exactly why they have to be named here: nothing else
       // is watching this switch.
+      // ambientDaylight is deliberately absent from the list below: it is a
+      // sibling layer with its own switch, so turning the direct sun off must
+      // not silently turn the sky off with it.
       if ("sunlight" in out && !out.sunlight) {
         return {
           ...out,

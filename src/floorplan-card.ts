@@ -8,6 +8,7 @@ import type {
   FloorItem,
   FloorText,
   Floor,
+  Furniture,
   Area,
   OverlayScale,
   RenderHass,
@@ -16,6 +17,7 @@ import { buildRenderHass } from "./replay-history/render-state-service";
 import "./replay-history/history-timeline";
 import "./replay-history/replay-panel";
 import { cssColor, cssColorOr, cssNumber, cssIdent, cssEntityId, contrastText } from "./css-safe";
+import { paletteStyle, paletteKey, resolvePaletteColor } from "./palette";
 import {
   DEFAULT_WIDTH,
   DEFAULT_HEIGHT,
@@ -35,7 +37,6 @@ import {
   trackerPresenceDetected,
   newPlanConfig,
   FURNITURE_COLOR,
-  type Furniture,
 } from "./types";
 import {
   WALL_THICKNESS,
@@ -69,6 +70,8 @@ import {
   renderRipple,
   renderFurniture,
   furnitureColor,
+  furnitureAccessibleName,
+  furnitureActionForGesture,
   furnitureFloorTarget,
   renderTracker,
   renderArea,
@@ -99,6 +102,7 @@ import {
   offlineStyleOf,
   itemIsOffline,
   itemHiddenWhenInactive,
+  itemHiddenUntilZoomed,
   itemBadgeHidden,
   itemLabelSize,
   itemLabelColor,
@@ -115,6 +119,7 @@ import {
   SUN_LIGHT_COLOR,
   SUN_SHADE_COLOR,
   hassRenderInputsChanged,
+  collectNamedEntities,
   collectWatchedEntities,
   resolveItemIcon,
   resolveIconAnimation,
@@ -122,6 +127,7 @@ import {
   resolvePlanRotation,
   subscribeOrientation,
   rotatedCanvasSize,
+  rotatePlanAngle,
   rotatePlanPoint,
   planRotationTransform,
   areaZoomTransform,
@@ -158,8 +164,15 @@ import {
   SKIN_TEXT,
   SKIN_WALL,
 } from "./skins";
-import { actionForGesture, executeAction, hasAction, itemIsInteractive } from "./actions";
+import {
+  actionForGesture,
+  executeAction,
+  gestureDoesSomething,
+  hasAction,
+  itemIsInteractive,
+} from "./actions";
 import { actionHandler } from "./action-handler";
+import { renderAmbientDaylightLayer } from "./ambient-daylight-integration";
 import { ReplayControllerImpl } from "./replay-history/replay-controller";
 import { createReplayPanelProps, renderReplayPanel } from "./replay-history/replay-panel";
 
@@ -196,6 +209,11 @@ export class FloorplanCard extends LitElement {
   private readonly _glowIdBase = `fp-glow-${FloorplanCard._nextGlowId++}`;
   /** Entity ids this plan actually displays; used to skip irrelevant hass updates. */
   private _watchedEntities: Set<string> = new Set();
+  /**
+   * Entities that only appear in an accessible name (issue #284). Kept apart
+   * from `_watchedEntities` on purpose — see `collectNamedEntities`.
+   */
+  private _nameEntities: Set<string> = new Set();
   private readonly _replayController = new ReplayControllerImpl({
     getConfig: () => this._config,
     getHass: () => this.hass,
@@ -279,6 +297,7 @@ export class FloorplanCard extends LitElement {
       furniture: config.furniture ?? [],
     };
     this._watchedEntities = collectWatchedEntities(this._config);
+    this._nameEntities = collectNamedEntities(this._config);
     this._syncHistoryServiceContext();
     this._replayController.clearConfigColorCache();
     // HA calls setConfig on every keystroke in the config box. Clearing the
@@ -318,7 +337,16 @@ export class FloorplanCard extends LitElement {
     if (!(changed.size === 1 && changed.has("hass"))) return true;
     const prev = changed.get("hass") as HomeAssistant | undefined;
     if (!prev || !this.hass) return true;
-    return hassRenderInputsChanged(prev, this.hass, this._watchedEntities);
+    if (hassRenderInputsChanged(prev, this.hass, this._watchedEntities)) return true;
+    // Entities that name a button but draw nothing. They have to invalidate a
+    // render — a renamed entity, or one that did not exist at first paint,
+    // otherwise leaves the label stuck at the name it first found — but they
+    // stay out of `_watchedEntities` so `buildRenderHass` never asks a replay
+    // for the history of something the plan does not show.
+    for (const id of this._nameEntities) {
+      if (prev.states[id] !== this.hass.states[id]) return true;
+    }
+    return false;
   }
 
   /**
@@ -730,6 +758,29 @@ export class FloorplanCard extends LitElement {
     executeAction(this, this.hass, { entity: press.entity }, press.config);
   }
 
+  /**
+   * A gesture on a piece of furniture (issue #284): its configured action, or —
+   * for a tap with nothing configured — the floor change it already did.
+   *
+   * The same shape as `_onAreaAction`, and for the same reason: every plan
+   * drawn before furniture had actions has three unset gestures, so a
+   * staircase still changes floor on tap and nothing else answers at all.
+   */
+  private _onFurnitureAction(
+    ev: CustomEvent<{ action: "tap" | "hold" | "double_tap" }>,
+    f: Furniture,
+    floors: readonly Floor[],
+    to: string | undefined,
+  ): void {
+    const press = furnitureActionForGesture(f, ev.detail.action);
+    if (!press) {
+      if (ev.detail.action === "tap" && to) this._goToFloor(floors, to);
+      return;
+    }
+    if (!this.hass) return;
+    executeAction(this, this.hass, { entity: press.entity }, press.config);
+  }
+
   private _renderBadge(item: FloorItem, scale: OverlayScale, renderHass: RenderHass | undefined): TemplateResult {
     const size = cssNumber(item.size, DEFAULT_ITEM_SIZE);
     const box = overlayLength(size, scale);
@@ -839,15 +890,51 @@ export class FloorplanCard extends LitElement {
     // stated explicitly, and only when the bulb actually reports a colour.
     const lightColor = lightBadgePaint(st);
     const activeColor = cssColor(item.activeColor) ?? lightColor;
+    // The off colour (issue #228): "users could specify separate colors for
+    // switches or doors when they are on/open and off/closed". Only painted
+    // while the device is actually inactive — `on` comes from entityIsActive,
+    // so this means off for a switch, closed for a cover and locked for a
+    // lock without the plan having to name each word.
+    //
+    // It stands down for an offline entity, and that is not a detail. An
+    // entity that has dropped out is not active either, so without this a dead
+    // cover would wear the same confident red as one that is genuinely shut —
+    // identical under `offlineStyle: none`, which draws no fading at all. That
+    // is exactly the picture issue #162 exists to prevent: "we have no
+    // reading" must not be told as "the reading is closed", least of all in
+    // the loudest colour on the plan. A device with no entity bound is not
+    // offline (issue #39's plain markers), so a shut window with no sensor
+    // still paints.
+    const inactiveColor = on || offline ? undefined : cssColor(item.inactiveColor);
     const rippleColor =
       item.rippleColor ?? stateColor ?? item.activeColor ?? lightColor ?? SKIN_ACCENT;
     // Ink that can actually be read on whatever the badge ended up painted
     // (issue #106, @MrMcFlyy): a white state colour used to take the theme's
     // white icon with it. undefined for a colour we cannot resolve — a
     // var()/color-mix()/gradient keeps the theme ink, exactly as before.
-    const badgeInk = contrastText(stateColor ?? activeColor);
+    // resolvePaletteColor first: a badge painted from the palette (issue #265)
+    // stores a var(), which contrastText cannot read and would answer
+    // undefined for — so moving a badge onto a named colour would quietly cost
+    // it the ink it had as a literal hex.
+    // Ink follows whatever the badge actually ends up painted — which since
+    // issue #228 is the inactive colour when the device is off, not the active
+    // one it was never going to wear.
+    const badgeInk = contrastText(
+      resolvePaletteColor(
+        stateColor ?? (on ? activeColor : inactiveColor),
+        this._config?.palette
+      )
+    );
     const rippleSize = item.rippleSize ?? DEFAULT_RIPPLE_SIZE;
-    const rippleDirection = item.rippleDirection ?? DEFAULT_RIPPLE_DIRECTION;
+    // Turned into the displayed frame (issue #280). The direction is a bearing
+    // in the room — which way the sensor looks — and the overlay it lives in is
+    // never rotated as a whole, so without this a rotated card aimed the cone
+    // at a different wall than the plan does. The shutter mark's normal has
+    // taken `rot` for the same reason since it existed.
+    const rippleDirection = rotatePlanAngle(
+      item.rippleDirection ?? DEFAULT_RIPPLE_DIRECTION,
+      rot
+    );
     const rippleWidth = item.rippleWidth ?? DEFAULT_RIPPLE_WIDTH;
 
     // Apply visibility hidden to keep the layout space intact for the label
@@ -887,7 +974,7 @@ export class FloorplanCard extends LitElement {
       <div
         class="item fp-item ${on ? "on" : "off"} ${offline ? "offline" : ""} ${stateColor
           ? "state-colored"
-          : ""} ${interactive ? "interactive" : ""}"
+          : ""} ${inactiveColor ? "inactive-colored" : ""} ${interactive ? "interactive" : ""}"
         data-id=${cssIdent(item.id) ?? nothing}
         data-entity=${cssEntityId(item.entity) ?? nothing}
         data-kind=${cssIdent(item.kind) ?? nothing}
@@ -895,6 +982,8 @@ export class FloorplanCard extends LitElement {
           ? `--fp-state:${stateColor};`
           : ""}${activeColor
           ? `--fp-active:${activeColor};`
+          : ""}${inactiveColor
+          ? `--fp-inactive:${inactiveColor};`
           : ""}${badgeInk ? `--fp-ink:${badgeInk};` : ""}"
         title=${this._label(item, renderHass)}
         role=${interactive ? "button" : nothing}
@@ -1009,23 +1098,87 @@ export class FloorplanCard extends LitElement {
       // is still a staircase, but it takes no clicks rather than
       // offering a control that does nothing.
       const to = furnitureFloorTarget(f, floors, active.id);
-      if (!to) return drawn;
+      // …and anything else the piece was told to do (issue #284). Hold
+      // and double-tap are asked for separately because the handler
+      // needs to know whether to spend their timers: a staircase with
+      // only a floor change must still answer a tap immediately.
+      //
+      // Whether the gesture could actually *run*, which is a stricter
+      // question than whether one is configured. `hasAction` only says
+      // "present and not `none`", and the guards `executeAction`
+      // applies go further: a `more-info` with no entity to show, a
+      // `navigate` with no path, a `call-service` with no service all
+      // pass it and then do nothing. Asking the weaker question hands
+      // a tab stop and a button role to a piece that answers to
+      // nothing, and spends the hold and double-tap timers on gestures
+      // that cannot fire — so every tap waits out a hold that was
+      // never going to happen.
+      const runs = (g: "tap" | "hold" | "double_tap"): boolean => {
+        const p = furnitureActionForGesture(f, g);
+        return !!p && gestureDoesSomething({ entity: p.entity }, p.config);
+      };
+      const hasHold = runs("hold");
+      const hasDoubleClick = runs("double_tap");
+      const hasTap = runs("tap");
+      // Configured at all, `none` included — a separate question from
+      // whether it does anything. Writing `tap_action: none` on a
+      // staircase is how a plan says "draw the stairs, but do not let
+      // them navigate", so a configured tap suppresses the floor
+      // fallback whether or not it is a no-op. `_onFurnitureAction`
+      // decides the same way, by asking whether a tap was configured
+      // rather than whether it does anything.
+      const tapConfigured = !!furnitureActionForGesture(f, "tap");
+      const goesToFloor = !!to && !tapConfigured;
+      // An inert piece stays inert: no role, no tab stop, no listeners.
+      // A gray diagram that announces itself as a button and then does
+      // nothing is worse than one that says nothing at all.
+      if (!goesToFloor && !hasTap && !hasHold && !hasDoubleClick) return drawn;
+      // The button role and the tab stop are earned by the *tap*, not by
+      // any gesture at all. `actionHandler` turns Enter and Space into
+      // a tap and nothing else, so a piece whose only action sits on
+      // hold or double-tap would take focus, announce itself as a
+      // button, and then do nothing when a keyboard user pressed it —
+      // a promise this card cannot keep.
+      //
+      // Such a piece keeps its listeners, so the hold still works under
+      // a pointer; it just stops advertising a control that cannot be
+      // operated. Hold and double-tap being pointer-only is not new
+      // here — it is true of every item and room on the plan, because
+      // the keyboard has one activation and they are the second and
+      // third gestures on it.
+      const tappable = hasTap || goesToFloor;
       const name = floors.find((x) => x.id === to)?.name;
-      return svg`<g class="fp-furniture-link" role="button" tabindex="0"
-            @action=${() => this._goToFloor(floors, to)}
-            .actionHandler=${actionHandler({
-              // A staircase has one gesture. Saying so keeps a tap from
-              // sitting out the hold and double-tap timers before it
-              // does anything.
-              hasHold: false,
-              hasDoubleClick: false,
-            })}>
+      // Names the gesture that actually runs. A configured tap replaces
+      // the floor change, so promising "Go to Upstairs" would be a lie
+      // on exactly the plans this feature was asked for.
+      const label = goesToFloor ? (name ? `Go to ${name}` : "Go to the next floor") : undefined;
+      // With no floor label there is nothing naming this button, so
+      // say what it is. Only in that case: an `aria-label` would
+      // override the <title> that is already doing the job.
+      //
+      // From the live hass, not `renderHass`, which is the one place
+      // in this template that wants it. `renderHass` is filtered to
+      // the entities the *drawing* watches, and an action's target is
+      // deliberately not one of them — a tap opening a light does not
+      // change how the room looks. Reading the name there would find
+      // nothing and fall back to the raw entity id. It is also what
+      // the gesture itself does: `_onFurnitureAction` hands the live
+      // hass to `executeAction`, so the button is named after the
+      // state it will actually act on, replay or no replay.
+      const spoken = tappable && !label ? furnitureAccessibleName(f, this.hass, symbolCatalog(c.symbols)) : nothing;
+      return svg`<g class="fp-furniture-link"
+            role=${tappable ? "button" : nothing}
+            tabindex=${tappable ? "0" : nothing}
+            aria-label=${spoken}
+            @action=${(ev: CustomEvent<{ action: "tap" | "hold" | "double_tap" }>) =>
+              this._onFurnitureAction(ev, f, floors, to)}
+            .actionHandler=${actionHandler({ hasHold, hasDoubleClick })}>
           <!-- An SVG tooltip is a <title> child, not a title=
                attribute: the attribute does nothing here. -->
-          <title>${name ? `Go to ${name}` : "Go to the next floor"}</title>
+          ${label ? svg`<title>${label}</title>` : nothing}
           ${drawn}
         </g>`;
-    };
+        };
     // The block's colour: what the glyph is drawn in, through the same allowlist.
     const furnitureTone = (f: Furniture): string =>
       furnitureColor(f, f.entity ? renderHass?.states[f.entity]?.state : undefined) ??
@@ -1124,7 +1277,17 @@ export class FloorplanCard extends LitElement {
            where no rule of ours reaches. compactHeader therefore does not
            shrink it — it declines it, and draws the title inside the stage
            instead, where it costs no layout height at all (issue #152). -->
-      <ha-card .header=${compact ? nothing : (c.title ?? nothing)}>
+      <!-- The palette (issue #265) rides here, above everything that could
+           name one of its colours — the floor switcher and the card background
+           as well as the plan. Inline rather than on :host like the skin
+           tokens, because unlike a skin it is per-config data and there is no
+           fixed set of rules to write ahead of time. It declares only
+           --fp-color-* names, so a card-mod rule on this element still owns
+           every --fp-skin-* token exactly as issue #155 left it. -->
+      <ha-card
+        .header=${compact ? nothing : (c.title ?? nothing)}
+        style=${paletteStyle(c.palette) || nothing}
+      >
         <div class="card-shell ${this._replayController.isHistoryVisible() ? "replay-visible" : ""}">
           ${this._config.historyReplay?.enabled ? this._renderReplayPanel() : nothing}
           <div
@@ -1180,9 +1343,13 @@ export class FloorplanCard extends LitElement {
                every door, window and room fill painted in the previous skin's
                colours while the computed values were already correct. Keying
                rebuilds the subtree instead, which repaints by construction.
-               Only on a skin change; ordinary state updates are untouched. -->
+               Only on a skin change; ordinary state updates are untouched.
+
+               Recolouring a palette entry (issue #265) is the same change seen
+               from the other end — a custom property moving under a var() in a
+               presentation attribute — so it is in this key too. -->
           ${keyed(
-            c.skin ?? "",
+            `${c.skin ?? ""}|${paletteKey(c.palette)}`,
             svg`<svg viewBox="0 0 ${dims.w} ${dims.h}" preserveAspectRatio="none">
             <g transform=${projTransform || nothing}>
             <g transform=${rotTransform || nothing}>
@@ -1211,6 +1378,20 @@ export class FloorplanCard extends LitElement {
                   ${renderArea(a, areaColor(a, a.entity ? renderHass?.states[a.entity]?.state : undefined))}
                 </g>`;
             })}
+            <!-- Diffuse sky light (PR #204). Reads its opening travel, shutter
+                 state and sun elevation through the same replay-aware state
+                 source as every other light layer, so a replayed plan shows the
+                 daylight of the moment being replayed rather than of now. -->
+            ${renderAmbientDaylightLayer(
+              active,
+              c,
+              renderHass,
+              `${this._wallMaskId}-ambient`,
+              {
+                amount: (o) => this._openingAmount(o, renderHass),
+                secondAmount: (o) => this._openingSecond(o, renderHass)?.amount,
+              }
+            )}
             <!-- Dead spaces (issue #88): the regions the walls seal off that no
                  door or window reaches, hatched. Above the room fills, so a
                  region someone has also drawn an area over still reads as
@@ -1351,6 +1532,19 @@ export class FloorplanCard extends LitElement {
                 : undefined;
               const symbol = renderOpening(o, {
                 color: SKIN_WALL,
+                // The closed tone (issue #228). Absent, the moving parts stay
+                // the wall colour, which is what a closed opening always was —
+                // and that is also what an opening whose contact has dropped
+                // out falls back to, so a dead sensor does not draw the same
+                // emphatic "shut" as a door that really is (issue #162).
+                // Guarded on `hass` for the same reason the device path is:
+                // before the first states arrive every opening would read as
+                // offline and the closed colour would flash off on load.
+                inactive:
+                  !!this.hass &&
+                  itemIsOffline(o, o.entity ? renderHass?.states[o.entity]?.state : undefined)
+                    ? undefined
+                    : o.inactiveColor,
                 open: amount > 0,
                 amount,
                 active: this._openingActive(o, renderHass),
@@ -1459,14 +1653,15 @@ export class FloorplanCard extends LitElement {
               // No entity filter: devices that exist physically but have no HA
               // entity still deserve their badge (issue #39). Keyed by id so a
               // floor switch builds fresh DOM (see the openings comment).
-              // "Only when active" devices drop out here (issue #55) — the
+              // "Only when active" devices drop out here (issue #55), and so do
+              // the ones that only show inside their own room (#222) — the
               // editor still draws them, dimmed, so they stay editable.
               active.items.filter(
                 (it) =>
                   !itemHiddenWhenInactive(
                     it,
                     it.entity ? renderHass?.states[it.entity]?.state : undefined
-                  )
+                  ) && !itemHiddenUntilZoomed(it, zoomedArea)
               ),
               (it, i) => it.id || i,
               (it) => this._renderItem(it, c, rot, scale, renderHass)
@@ -2240,6 +2435,15 @@ export class FloorplanCard extends LitElement {
          Assistant theme would otherwise take that theme's near-white text. */
       color: var(--fp-ink, var(--fp-skin-active-ink, var(--text-primary-color, #212121)));
     }
+    /* The off colour (issue #228). Its own class rather than a var() fallback
+       on the base .badge rule, so a plan that never sets one emits nothing new
+       and looks exactly as it did. Declared before .state-colored, which still
+       wins — a threshold rule is the more specific statement. */
+    .item.inactive-colored .badge {
+      background: var(--fp-inactive);
+      border-color: var(--fp-inactive);
+      color: var(--fp-ink, var(--text-primary-color, #212121));
+    }
     /* A resolved state colour paints the badge whatever the on/off state —
        thresholds exist for sensors, which are never "on". Declared *after* the
        .on rule (equal specificity) so state rules win over the active colour. */
@@ -2260,6 +2464,13 @@ export class FloorplanCard extends LitElement {
        entity is never entityIsActive, so it has already fallen back to the
        resting badge. What is added is the *fading*, which says "we have no
        reading" rather than "the reading is off".
+
+       That "already fallen back" is load-bearing, and issue #228 is the first
+       thing that could have broken it: inactiveColor paints on exactly the
+       not-active test an offline entity also fails. It is gated on this one
+       too, in _renderItem — otherwise a dead device would be drawn in the
+       loudest colour on the plan, and offline-none would make it identical to
+       a device that really is shut.
 
        offline-none declares nothing at all, which is the point of it. */
     .offline-dim .item.offline {
