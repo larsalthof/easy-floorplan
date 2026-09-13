@@ -390,6 +390,15 @@ selecting a view in the editor removes the old alias.
   a fixed 60 canvas units by default while we experiment with different plan sizes.
   Zero height gives an isometric floor with the flat opening symbols.
 
+Screenshots from the standalone preview with simulated entities and placeholder
+icons (`wallHeight: 60`, `wallOpacity: 0.65`):
+
+| Doors and windows closed | Doors and windows open |
+| --- | --- |
+| ![3D view with closed doors and windows](img/3d-view-closed.png) | ![3D view with open doors and windows](img/3d-view-open.png) |
+
+![Night view with a lit reading lamp](img/3d-view-night.png)
+
 This remains an isometric 2.5D view. Panels currently update directly to their new
 positions; smooth motion between states is a follow-up. Depth ordering uses a
 painter's sort and can misorder diagonal walls or large objects. Furniture still
