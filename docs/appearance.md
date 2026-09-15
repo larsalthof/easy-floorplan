@@ -438,7 +438,10 @@ selecting a view in the editor removes the old alias.
 - Walls stand above the floor and leave gaps for doors and windows. Swinging leaves,
   sliding panels, roll-up curtains and awning windows now stand in those gaps and
   update with their entities, including partial positions, independent second leaves,
-  and external shutters. The same opening actions work in either view.
+  and external shutters. The same opening actions work in either view. A panel
+  eases to its new position over half a second, the same travel the flat view's
+  leaf uses, and goes straight there for viewers whose system asks for reduced
+  motion. Scrubbing history steps from state to state without easing.
 - Furniture stands as a block with its usual glyph on top. Furniture actions and
   staircase navigation continue to work.
 - Rooms, light pools, direct sunlight, ambient daylight and background images stay
@@ -448,7 +451,9 @@ selecting a view in the editor removes the old alias.
 - Badges and labels stay upright. Their positions follow the projected floor,
   including on narrow cards and after rotation. Room zoom reserves space for wall
   tops, and the canvas includes a margin for wall caps at its edges.
-- Lower **Wall height** or **Wall opacity** to reveal more of a room. Height remains
+- Lower **Wall height** or **Wall opacity** to reveal more of a room. Everything
+  standing in the wall plane fades together, doors and shutters included, while
+  glass keeps its own tint and furniture stays solid inside the room. Height remains
   a fixed 60 canvas units by default while we experiment with different plan sizes.
   Zero height gives an isometric floor with the flat opening symbols.
 
@@ -461,8 +466,7 @@ icons (`wallHeight: 60`, `wallOpacity: 0.65`):
 
 ![Night view with a lit reading lamp](img/3d-view-night.png)
 
-This remains an isometric 2.5D view. Panels currently update directly to their new
-positions; smooth motion between states is a follow-up. Depth ordering uses a
+This remains an isometric 2.5D view. Depth ordering uses a
 painter's sort and can misorder diagonal walls or large objects. Furniture still
 uses a shared height. Pin-shaped device markers and per-symbol heights are also
 follow-ups.

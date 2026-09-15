@@ -51,6 +51,9 @@ async function mount(extra: Partial<FloorplanCardConfig> = {}) {
 
 afterEach(() => { document.body.innerHTML = ""; });
 
+/** Longer than the 0.5s panel travel, so whatever is read has arrived. */
+const settled = () => new Promise((r) => setTimeout(r, 700));
+
 describe("3D card integration", () => {
   it.each([0, 90, 180, 270] as PlanRotation[])("keeps walls inside the canvas and badges on their light at rotation %s", async (rotation) => {
     const { root, host, card } = await mount({ rotation });
@@ -85,6 +88,8 @@ describe("3D card integration", () => {
     const before = root.querySelector('.fp-iso-panel[data-id="door"]')!.getAttribute("points");
     card.hass = hass(true);
     await card.updateComplete;
+    // The leaf eases across rather than jumping (see the travel tests below).
+    await settled();
     expect(root.querySelector('.fp-iso-panel[data-id="door"]')!.getAttribute("points")).not.toBe(before);
     expect(root.querySelector(".fp-door-leaf")).toBeNull();
     const opened: string[] = [];
@@ -108,6 +113,40 @@ describe("3D card integration", () => {
     await card.updateComplete;
     expect(root.querySelector(".fp-iso")).toBeNull();
     expect(root.querySelector(".fp-door-leaf")).not.toBeNull();
+  });
+
+  it("eases a leaf across its swing instead of jumping it there", async () => {
+    const { root, card } = await mount();
+    const points = () => root.querySelector('.fp-iso-panel[data-id="door"]')!.getAttribute("points");
+    const shut = points();
+    card.hass = hass(true);
+    await card.updateComplete;
+    // Still shut on the frame the new state arrives: that is where it sets off
+    // from, and the jump this replaces happened right here.
+    expect(points()).toBe(shut);
+    await new Promise((r) => setTimeout(r, 150));
+    const midway = points();
+    expect(midway).not.toBe(shut);
+    await settled();
+    expect(points()).not.toBe(midway);
+  });
+
+  it("puts the leaf straight there when the viewer asks for less motion", async () => {
+    const real = window.matchMedia;
+    window.matchMedia = ((q: string) =>
+      q.includes("prefers-reduced-motion")
+        ? ({ matches: true, media: q, addEventListener() {}, removeEventListener() {} } as unknown as MediaQueryList)
+        : real.call(window, q)) as typeof window.matchMedia;
+    try {
+      const { root, card } = await mount();
+      const points = () => root.querySelector('.fp-iso-panel[data-id="door"]')!.getAttribute("points");
+      const shut = points();
+      card.hass = hass(true);
+      await card.updateComplete;
+      expect(points()).not.toBe(shut);
+    } finally {
+      window.matchMedia = real;
+    }
   });
 
   it("retains flat opening controls at zero wall height", async () => {

@@ -157,6 +157,7 @@ import {
   type DisplayFrame,
 } from "./projection";
 import { openingSolids } from "./projection-openings";
+import { AmountTween, OPENING_TWEEN_MS, rafTweenFrames } from "./opening-tween";
 import type { SVGTemplateResult } from "lit";
 import { symbolCatalog } from "./symbols";
 import { deadSpacesCached } from "./dead-space";
@@ -211,6 +212,12 @@ export class FloorplanCard extends LitElement {
   /** View-state: which area (if any) the plan is zoomed in to. Never persisted. */
   @state() private _zoomedAreaId?: string;
   private readonly _wallMaskId = `fp-wall-mask-${FloorplanCard._nextWallMaskId++}`;
+  /**
+   * Eased travel for the standing panels (issue #261). The flat view leaves
+   * this to a CSS transition; a projected panel is rebuilt from its travel
+   * every render, so the number itself is what has to move.
+   */
+  private readonly _openingTween = new AmountTween(rafTweenFrames, () => this.requestUpdate());
   /** Prefix for this card's glow gradient ids, unique per instance (issue #6). */
   private readonly _glowIdBase = `fp-glow-${FloorplanCard._nextGlowId++}`;
   /** Entity ids this plan actually displays; used to skip irrelevant hass updates. */
@@ -464,6 +471,7 @@ export class FloorplanCard extends LitElement {
 
   public disconnectedCallback(): void {
     this._replayController.stopReplayLoop();
+    this._openingTween.stop();
     // Orientation subscription for the per-screen rotations (issue #237).
     // Folded in here rather than declared as a second `disconnectedCallback`:
     // a class may only have one, and the later declaration would silently
@@ -614,6 +622,36 @@ export class FloorplanCard extends LitElement {
   }
 
   /**
+   * The same style with every travelling number eased rather than jumped
+   * (issue #261 review). One key per panel that moves on its own, so the two
+   * leaves of a double door and a shutter over them each keep their own clock.
+   *
+   * `open` is recomputed from the eased travel: a door closing is still a door
+   * that is open, and dropping its panels at the first frame of the movement
+   * is the jump this exists to remove.
+   */
+  private _travelling(o: Opening, style: OpeningStyle): OpeningStyle {
+    const at = (part: string, amount: number) => this._openingTween.value(`${o.id}:${part}`, amount);
+    const amount = at("leaf", style.amount ?? (style.open === false ? 0 : 1));
+    const shutter = style.shutter;
+    return {
+      ...style,
+      amount,
+      open: amount > 0,
+      second: style.second ? { ...style.second, amount: at("leaf2", style.second.amount) } : undefined,
+      shutter: shutter
+        ? {
+            ...shutter,
+            amount: at("shutter", shutter.amount),
+            second: shutter.second
+              ? { ...shutter.second, amount: at("shutter2", shutter.second.amount) }
+              : undefined,
+          }
+        : undefined,
+    };
+  }
+
+  /**
    * The isometric view's standing geometry (issue #261): walls as extruded
    * boxes, cut at their doors and lowered to a sill under their windows, and
    * furniture as blocks with the plan's own glyph on top. Drawn in the
@@ -628,8 +666,14 @@ export class FloorplanCard extends LitElement {
     rotTransform: string,
     drawFurniture: (f: Furniture) => SVGTemplateResult,
     furnitureTone: (f: Furniture) => string,
-    renderHass: RenderHass | undefined
+    renderHass: RenderHass | undefined,
+    animate: boolean
   ): SVGTemplateResult {
+    // Reduced motion is honoured the same way the CSS transitions are, and
+    // read per render so a preference changed mid-session takes effect.
+    this._openingTween.setDuration(
+      animate && !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? OPENING_TWEEN_MS : 0
+    );
     const map = (x: number, y: number) => rotatePlanPoint(x, y, c.width, c.height, rot);
     const walls = active.walls.map((w) => {
       const a = map(w.x1, w.y1);
@@ -643,7 +687,7 @@ export class FloorplanCard extends LitElement {
     });
     const solids = wallSolids(walls, openings, frame.wallHeight, false);
     for (const o of active.openings) {
-      solids.push(...openingSolids(o, this._openingStyle(o, renderHass), map, frame.wallHeight));
+      solids.push(...openingSolids(o, this._travelling(o, this._openingStyle(o, renderHass)), map, frame.wallHeight));
     }
     const height = frame.wallHeight * FURNITURE_HEIGHT_FRACTION;
     // The glyph is drawn in plan coordinates, so it is lifted by the plan-space
@@ -1154,6 +1198,8 @@ export class FloorplanCard extends LitElement {
     // instead of being drawn flat. The sun dimming has to reach the tops of
     // the walls too, which lie `wallHeight` outside the plan rectangle.
     const iso = frame.projection === "iso";
+    // Nothing to travel while the plan is flat: the leaf's CSS transition has it.
+    if (!iso) this._openingTween.stop();
     const projTransform = planProjectionTransform(frame);
     const dimPad = WALL_THICKNESS + (iso ? frame.wallHeight : 0);
     // One furniture glyph, flat. Drawn on the floor on the flat plan and on
@@ -1646,7 +1692,10 @@ export class FloorplanCard extends LitElement {
                  stops responding (the lesson from #108). -->
             </g>
             ${iso
-              ? this._renderIsoLayer(active, c, rot, frame, rotTransform, drawFurniture, furnitureTone, renderHass)
+              ? this._renderIsoLayer(active, c, rot, frame, rotTransform, drawFurniture, furnitureTone, renderHass,
+                  // Scrubbing history jumps from state to state on purpose;
+                  // easing between them would trail the scrubber.
+                  !replayState.enabled)
               : nothing}
             <g transform=${rotTransform || nothing}>
             ${
