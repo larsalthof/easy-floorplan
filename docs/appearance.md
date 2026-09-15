@@ -193,6 +193,68 @@ window, and a top-hung door is not a thing. A hand-written config may still set
 it on a door and the card draws it honestly — this is about what the editor
 suggests, not what it allows.
 
+## Balcony railings
+
+*"Allow a wall in the floor plan to be marked as belonging to a balcony, rather than being
+treated as a full-height wall."* (issue #182)
+
+Every line the card draws used to be a wall, and walls stop light. A balcony drawn with
+walls came out as a sealed box: its lamp stopped dead at the edge, and the railing stood
+between the sun and the balcony door behind it, so no sunlight ever came in that way.
+
+Set a wall's **Kind** to **Railing** and it is drawn thin, and light carries on over it —
+a lamp's pool spills past the edge, and the sun reaches the door again.
+
+![Before and after: a lamp pool clipped at the balcony edge, then spilling over a thin railing with sunlight entering the balcony door](img/balcony-railing.png)
+
+```yaml
+walls:
+  - { id: rail-west,  x1: 220, y1: 250, x2: 220, y2: 380, kind: railing }
+  - { id: rail-south, x1: 220, y1: 380, x2: 540, y2: 380, kind: railing }
+  - { id: rail-east,  x1: 540, y1: 380, x2: 540, y2: 250, kind: railing }
+```
+
+A railing also seals off no [dead space](behavior.md#dead-spaces): whatever it encloses is
+open to the air. It still takes doors and windows the way a wall does — a gate in a
+railing is a door — and an explicit **Thickness** is scaled down with it, so a railing
+stays thinner than the walls beside it.
+
+## Where the floor switcher sits
+
+The floor buttons have always been pinned to the plan's top-right corner. That is a guess
+about the drawing, and only the author knows whether their plan has anything there — *"they
+often end up right in the middle of the floor plan on smaller screens"* (issue #281).
+
+![The same plan twice: the switcher over the bedroom, and moved down into the empty hall](img/floor-switcher-position.png)
+
+Drag it. In the editor the switcher appears on the canvas as a handle — dimmed while it is
+still in its default corner — and dropping it anywhere stores the point:
+
+```yaml
+type: custom:easy-floorplan-card
+floorSwitcher: { x: 200, y: 152 }
+```
+
+**Canvas units, not screen pixels**, because it is a statement about the drawing: put it in
+the hall, not twelve pixels from an edge whose position depends on the phone. That also
+means it follows `rotation` exactly as devices and labels do, so a plan turned for a wall
+tablet keeps the switcher in the same corner of the house.
+
+A point outside the canvas is kept rather than clamped — a plan whose walls stop short of
+the edge has real margin to park it in.
+
+**Zooming into a room does not carry the switcher with it.** The buttons are how you change
+floor, and a zoom can scale the plan well past the card, so a switcher that travelled with
+the drawing would leave the screen the moment you tapped a room at the far end — with no
+way to change floor until you zoomed back out. It holds its place in the card instead. The
+position you choose is measured against the unzoomed plan, which is the view people
+normally see.
+
+**Project → Floor switcher** carries X and Y fields and a *Back to the corner* button —
+the coordinates because a drag needs a pointer and is aimed by eye, and the button because
+returning to the default is the one thing a drag cannot express. Leave it alone and nothing changes: a plan
+that stores no position emits no positioning at all and renders exactly as it always has.
+
 ## Overlay scale
 
 The card draws in two layers. Walls, doors, furniture and room fills are SVG, scaled from

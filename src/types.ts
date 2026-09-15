@@ -70,6 +70,16 @@ export interface Wall {
    */
   thickness?: number;
   /**
+   * What the line stands for (issue #182). Unset is a full-height `wall`.
+   *
+   * A `railing` is the low edge of a balcony, terrace or gallery: it is drawn
+   * as a thin line, and it is not in the way of anything that happens above
+   * waist height. Lamp light and sunlight carry on over it — a railing across
+   * a balcony used to shade the balcony door behind it all day — and it seals
+   * off no dead space, since what it encloses is open to the air.
+   */
+  kind?: WallKind;
+  /**
    * Pinned in place in the editor (issue #191).
    *
    * A locked element still selects, still edits, still deletes — everything but
@@ -93,6 +103,9 @@ export interface Wall {
    */
   locked?: boolean;
 }
+
+/** See {@link Wall.kind}. */
+export type WallKind = "wall" | "railing";
 
 export type OpeningType = "door" | "window";
 
@@ -379,11 +392,15 @@ export interface Opening {
    */
   icon?: string;
   /**
-   * Draw the shutter's icon beside the opening (default true, whenever both
-   * entities are bound). It is what makes the second entity visible at all —
-   * and a control of its own, since tapping it opens the shutter — but on a
-   * dense plan, or one where every window has a shutter, it is a lot of
-   * icons. Turning it off leaves the gestures untouched.
+   * Draw the shutter's icon beside the opening. Defaults to true when the
+   * opening's own entity is bound too: it is what makes the second entity
+   * visible at all — and a control of its own, since tapping it opens the
+   * shutter — but on a dense plan, or one where every window has a shutter, it
+   * is a lot of icons. Turning it off leaves the gestures untouched.
+   *
+   * Defaults to false with the shutter bound alone, where there is no second
+   * entity to reveal; `true` is for the raised roll-up that has left nothing on
+   * the plan but its track line (issue #293).
    */
   showShutterIcon?: boolean;
   /**
@@ -1840,6 +1857,26 @@ export interface FloorplanCardConfig extends LovelaceCardConfig {
   floors?: Floor[];
   /** Id of the floor shown first. Falls back to the first floor. */
   defaultFloor?: string;
+  /**
+   * Where the floor switcher sits on the plan (issue #281), in canvas units —
+   * the point the block of buttons is centred on.
+   *
+   * If unset, it stays pinned to the plan's top-right corner, which is where it
+   * has always been and is right until the plan has something there: *"they often
+   * end up right in the middle of the floor plan on smaller screens."* The
+   * corner is a guess about the drawing, and only the author knows which corner
+   * of their plan is empty.
+   *
+   * Canvas units rather than screen pixels or a percentage of the card, because
+   * the switcher lives inside the plan box and this is a statement about the
+   * *drawing*: put it in the hall, not 12px from an edge whose position depends
+   * on the phone. It follows `rotation` the way every other anchor does, so a
+   * rotated card keeps it in the same corner of the house.
+   *
+   * Off-canvas coordinates are honoured rather than clamped — a plan whose
+   * walls stop short of the canvas has legitimate empty margin to park it in.
+   */
+  floorSwitcher?: { x: number; y: number };
   /** Optional history replay controls and playback defaults. */
   historyReplay?: HistoryReplayConfig;
   walls?: Wall[];
