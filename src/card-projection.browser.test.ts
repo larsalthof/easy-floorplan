@@ -94,9 +94,15 @@ describe("3D card integration", () => {
     expect(opened).toEqual(["binary_sensor.door", "light.lamp"]);
   });
 
-  it("applies transparency only to walls and preserves the legacy mode alias", async () => {
+  it("fades the whole wall plane but not what stands inside the room, and preserves the legacy mode alias", async () => {
     const { root, card } = await mount({ view: undefined, projection: "iso" });
     expect(getComputedStyle(root.querySelector(".fp-iso-wall")!).opacity).toBe("0.45");
+    expect(getComputedStyle(root.querySelector(".fp-iso-sill")!).opacity).toBe("0.45");
+    // A closed leaf fills a gap in the wall, so leaving it opaque read as a
+    // patch of wall that had refused to turn transparent (issue #261 review).
+    expect(getComputedStyle(root.querySelector('.fp-iso-panel[data-id="door"]')!).opacity).toBe("0.45");
+    // Glass keeps its own alpha rather than being faded twice.
+    expect(getComputedStyle(root.querySelector(".fp-iso-glazed")!).opacity).toBe("1");
     expect(getComputedStyle(root.querySelector(".fp-iso-furniture")!).opacity).toBe("1");
     card.setConfig(config({ projection: "iso", view: "2d" }));
     await card.updateComplete;

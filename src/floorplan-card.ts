@@ -2138,7 +2138,11 @@ export class FloorplanCard extends LitElement {
        block keeps the paper on top so its glyph still reads. Wall faces pass
        taps through; opening panels and furniture keep their own actions. */
     .fp-iso-wall polygon, .fp-iso-sill polygon { stroke: none; }
-    .fp-iso-wall, .fp-iso-sill {
+    /* Everything standing in the wall plane fades together. A closed door leaf
+       left at full opacity read as a patch of wall that had refused to turn
+       transparent, which is what it looks like from the front (issue #261
+       review). Glazed panels keep their own glass alpha instead. */
+    .fp-iso-wall, .fp-iso-sill, .fp-iso-panel:not(.fp-iso-glazed) {
       opacity: var(--fp-wall-opacity, 1);
     }
     .fp-iso-panel {
