@@ -466,8 +466,8 @@ icons (`wallHeight: 60`, `wallOpacity: 0.65`):
 
 ![Night view with a lit reading lamp](img/3d-view-night.png)
 
-A casement window closing, sampled from the moment its sensor changed. The
-panels ease to the new position rather than arriving in one frame:
+A casement window closing, sampled by frame number from the moment its sensor
+changed. The panels ease to the new position rather than arriving in one frame:
 
 ![Window sashes easing shut over five frames](img/3d-view-panel-travel.png)
 
