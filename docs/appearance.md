@@ -466,6 +466,11 @@ icons (`wallHeight: 60`, `wallOpacity: 0.65`):
 
 ![Night view with a lit reading lamp](img/3d-view-night.png)
 
+A casement window closing, sampled from the moment its sensor changed. The
+panels ease to the new position rather than arriving in one frame:
+
+![Window sashes easing shut over five frames](img/3d-view-panel-travel.png)
+
 This remains an isometric 2.5D view. Depth ordering uses a
 painter's sort and can misorder diagonal walls or large objects. Furniture still
 uses a shared height. Pin-shaped device markers and per-symbol heights are also
