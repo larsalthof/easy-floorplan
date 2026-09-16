@@ -550,6 +550,11 @@ icons (`wallHeight: 60`, `wallOpacity: 0.65`):
 
 ![Night view with a lit reading lamp](img/3d-view-night.png)
 
+The repository's own demo plan, with its two roof windows: the blind down on
+one, the hatch open on the other.
+
+![The demo plan in 3D](img/3d-view-demo.png)
+
 A casement window closing, sampled by frame number from the moment its sensor
 changed. The panels ease to the new position rather than arriving in one frame:
 
