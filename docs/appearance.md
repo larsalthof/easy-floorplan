@@ -571,6 +571,10 @@ grow by exactly the factor the room grew by. On the same 420px card:
 | Focused, `auto` | 47.4px | 36.1px | 0.76 |
 | Focused, `2` | 72px | 36.1px | 0.50 |
 
+The same 420px card, unfocused and then focused both ways:
+
+![Full plan, focused with the default, and focused with auto](img/zoomed-badge-size.png)
+
 `auto` is a third larger and crowds exactly as the full plan did; `2` is twice the size
 and crowds half again as much. Use `auto` when you zoom to read a device, the default
 `1` when you zoom to separate devices that sit on top of each other, and a fixed
