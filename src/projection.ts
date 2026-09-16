@@ -28,6 +28,7 @@
 import { svg, nothing, type SVGTemplateResult } from "lit";
 import { cssNumber, cssIdent } from "./css-safe";
 import { OPENING_ON_WALL_EPS } from "./dead-space";
+import { openingIsSkylight, type OpeningType } from "./types";
 
 export type PlanProjection = "plan" | "iso";
 
@@ -212,7 +213,7 @@ export interface IsoOpeningInput {
   y: number;
   length: number;
   angle: number;
-  type: "door" | "window";
+  type: OpeningType;
 }
 
 interface Span {
@@ -230,6 +231,12 @@ function openingSpans(
 ): Span[] {
   const spans: Span[] = [];
   for (const o of openings) {
+    // A skylight is a hole in the ceiling, so it is a gap in no wall at all.
+    // The test below only asks whether its centre lies along this wall, and
+    // a roof light drawn over a partition passes that by coincidence — left
+    // in, it sawed the partition in half. The same guard the lighting code
+    // has (`wallsLightPassesThrough`), for the same reason.
+    if (openingIsSkylight(o)) continue;
     const rad = (o.angle * Math.PI) / 180;
     // Along the wall, or it is some other wall's opening.
     const cross = Math.abs(d.x * Math.sin(rad) - d.y * Math.cos(rad));
@@ -244,7 +251,7 @@ function openingSpans(
     const s0 = Math.max(0, t - o.length / 2);
     const s1 = Math.min(len, t + o.length / 2);
     if (s1 - s0 <= 0) continue;
-    spans.push({ s0, s1, type: o.type });
+    spans.push({ s0, s1, type: o.type === "window" ? "window" : "door" });
   }
   spans.sort((a, b) => a.s0 - b.s0);
   // Overlapping openings merge; the first one's kind wins.

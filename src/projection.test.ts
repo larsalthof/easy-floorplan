@@ -224,6 +224,14 @@ describe("wallSolids", () => {
     expect(wallSolids([wall], [away], H)).toHaveLength(plain);
   });
 
+  it("cuts no wall for a skylight, even one drawn right over it", () => {
+    // A roof light is a hole in the ceiling. Its centre can lie along a
+    // partition by coincidence, and that must not saw the partition in half.
+    const plain = wallSolids([wall], [], H);
+    const velux = { x: 100, y: 0, length: 40, angle: 0, type: "skylight" as const };
+    expect(wallSolids([wall], [velux], H)).toEqual(plain);
+  });
+
   it("cuts a door out of a wall that runs the other way", () => {
     const up = { id: "w2", x1: 0, y1: 0, x2: 0, y2: 200, thickness: 8 };
     const door = { x: 0, y: 100, length: 40, angle: 90, type: "door" as const };

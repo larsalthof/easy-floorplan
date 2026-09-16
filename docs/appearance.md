@@ -248,7 +248,9 @@ has not reached, which is where the light is actually coming through.
 For the roof **hatch** — a loft door, a smoke vent, a lantern with a solid flap
 — set `glazed: false` and the sash itself becomes what lets the light in.
 
-See [Skylights](lighting.md#skylights) for where that light lands.
+See [Skylights](lighting.md#skylights) for where that light lands. In the
+[3D view](#3d-view) the same skylight lies at the wall tops and tilts open from
+its hinge, with the blind drawn flat beneath the glass.
 
 ## Balcony railings
 
@@ -520,6 +522,10 @@ selecting a view in the editor removes the old alias.
   eases to its new position over half a second, the same travel the flat view's
   leaf uses, and goes straight there for viewers whose system asks for reduced
   motion. Scrubbing history steps from state to state without easing.
+- A [roof window](#roof-windows) lies in the roof plane at the wall tops, the
+  rectangle it is, and tilts up out of the roof from its hinge as the sash opens.
+  Its blind is drawn flat under the glass, as far down as the cover reports. It
+  cuts no wall, in this view as in the flat one.
 - Furniture stands as a block with its usual glyph on top. Furniture actions and
   staircase navigation continue to work.
 - Rooms, light pools, direct sunlight, ambient daylight and background images stay

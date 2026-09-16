@@ -3,7 +3,7 @@ import type { Opening } from "./types";
 import { cssColor, cssColorOr, cssNumber } from "./css-safe";
 import {
   WALL_THICKNESS, openingMotion, openingSash, openingSashSpan, openingIsGlazed, sliderStyleOf,
-  type OpeningStyle,
+  openingIsSkylight, skylightWidth, type OpeningStyle,
 } from "./render";
 import { SKIN_ACCENT } from "./skins";
 import { SILL_FRACTION, GLASS_FRACTION, type IsoSolid, type Pt } from "./projection";
@@ -15,6 +15,7 @@ export function openingSolids(
   height: number,
 ): IsoSolid[] {
   if (!(height > 0) || !(o.length > 0)) return [];
+  if (openingIsSkylight(o)) return skylightSolids(o, style, map, height);
   const out: IsoSolid[] = [];
   const half = o.length / 2;
   const z0 = o.type === "window" ? height * SILL_FRACTION : 0;
@@ -108,5 +109,87 @@ export function openingSolids(
       pane(-half, 2, half, 2, paint, z0 + (z1 - z0) * a, z1, false);
     }
   }
+  return out;
+}
+
+/**
+ * A roof window in the standing view: a pane lying in the roof plane at the
+ * wall tops, hinged along its head, tilting up and out as its sash opens.
+ *
+ * The one opening whose flat symbol is not a gap in a wall, so nothing here
+ * cuts anything — {@link wallSolids} skips it — and the one that has a
+ * second plan dimension, its `width` across its `length`. From above the
+ * sash is the rectangle it is; the flat view's foreshortening was the
+ * honest picture from below, and this is the honest one from a corner.
+ *
+ * Its blind, when it has one, is drawn as a flat panel just under the glass,
+ * covering the aperture from the hinge edge as far as the cover reports —
+ * the skylight's blind is the one shutter in the plan seen face-on, so its
+ * half-way positions are drawn as half-way, the same as in the flat view.
+ *
+ * Painted with the footprint's own depth key, which is right: any wall that
+ * could overlap it on screen stands nearer the far corner than the roof
+ * plane it sits in, so it is drawn later and reads as above them, which it is.
+ */
+/** How far a roof window's sash tilts out of the roof plane when fully open. */
+export const SKYLIGHT_MAX_TILT = Math.PI / 3;
+
+function skylightSolids(
+  o: Opening,
+  style: OpeningStyle,
+  map: (x: number, y: number) => Pt,
+  height: number,
+): IsoSolid[] {
+  const half = o.length / 2;
+  const halfW = skylightWidth(o) / 2;
+  if (!(halfW > 0)) return [];
+  const clamp = (v: unknown) => Math.max(0, Math.min(1, cssNumber(v, 0)));
+  const amount = clamp(style.amount ?? (style.open === false ? 0 : 1));
+  const tone = (a: number, active: boolean | undefined, accent = style.accent) =>
+    cssColorOr(active ? accent : a === 0 ? cssColor(style.inactive) ?? style.color : style.color, SKIN_ACCENT);
+  const rad = o.angle * Math.PI / 180;
+  // Local x runs along the length, local y across the width; the head — the
+  // hinge — is the −y edge, and `flipV` hangs it from the other one, exactly
+  // as the flat symbol does.
+  const at = (x: number, y: number): Pt => {
+    x *= o.flipH ? -1 : 1;
+    y *= o.flipV ? -1 : 1;
+    return map(o.x + x * Math.cos(rad) - y * Math.sin(rad), o.y + x * Math.sin(rad) + y * Math.cos(rad));
+  };
+  const flat = (y0: number, y1: number) =>
+    [at(-half, y0), at(half, y0), at(half, y1), at(-half, y1)];
+  const base = flat(-halfW, halfW);
+  const out: IsoSolid[] = [];
+  // The whole aperture stays the target, however far the sash has tilted.
+  out.push({ kind: "opening-hit", id: o.id, base, z0: height, z1: height,
+    vertices: base.map((p) => ({ ...p, z: height })) });
+  if (style.shutter) {
+    const a = clamp(style.shutter.amount);
+    const covered = halfW * 2 * (1 - a);
+    if (covered > 0) {
+      const blind = flat(-halfW, -halfW + covered);
+      out.push({ kind: "panel", id: o.id, base, z0: height, z1: height,
+        color: tone(a, style.shutter.active, style.shutter.accent ?? style.accent), glazed: false,
+        vertices: blind.map((p) => ({ ...p, z: height })) });
+    }
+  }
+  // Hinged at the head: the free edge lifts out of the roof plane and
+  // travels back toward the hinge as it does, the awning's motion turned
+  // one axis further round. Fully open is 60°, and the number is chosen by
+  // the camera rather than by the hardware: under the 30° isometric a sash
+  // hung from its far edge tilts *away* from the viewer, and at 45° it is
+  // seen exactly edge-on — the sliver the flat view draws on purpose, and
+  // here indistinguishable from shut. 60° shows the back of an open sash
+  // from every corner, and stays short of upright, where it read as a piece
+  // of wall that had lost its way.
+  const tilt = amount * SKYLIGHT_MAX_TILT;
+  const w = halfW * 2;
+  const freeY = -halfW + w * Math.cos(tilt);
+  const freeZ = height + w * Math.sin(tilt);
+  const [hingeA, hingeB] = [at(-half, -halfW), at(half, -halfW)];
+  const [freeB, freeA] = [at(half, freeY), at(-half, freeY)];
+  out.push({ kind: "panel", id: o.id, base, z0: height, z1: freeZ,
+    color: tone(amount, style.active), glazed: openingIsGlazed(o),
+    vertices: [{ ...hingeA, z: height }, { ...hingeB, z: height }, { ...freeB, z: freeZ }, { ...freeA, z: freeZ }] });
   return out;
 }

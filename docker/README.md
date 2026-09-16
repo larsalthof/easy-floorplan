@@ -306,7 +306,7 @@ npx vite --host 127.0.0.1 --port 5261
 
 Open [the 3D preview](http://127.0.0.1:5261/docker/3d-preview.html). It imports the
 actual card source and supplies simulated entities. Change the viewing corner,
-wall height and opacity; toggle doors and day/night; tap a room to check zoom.
+wall height and opacity; toggle doors, the roof window and its blind, and day/night; tap a room to check zoom.
 The icon placeholder is local to this preview. Use the HA container above to
 check real entity services, HA icons, editor selectors and history playback.
 
