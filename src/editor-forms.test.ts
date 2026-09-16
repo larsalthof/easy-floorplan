@@ -1239,6 +1239,7 @@ describe("wallForm / projectForm / floorImageForm", () => {
       "rotationLandscape",
       "overlayScale",
       "compactHeader",
+      "zoomedOverlayAuto",
       "zoomedOverlayScale",
       "roomFocusControls",
       "roomFocusInterval",
@@ -2145,6 +2146,7 @@ describe("every field lands in exactly one panel group", () => {
       "overlayScale",
       "overlayMinWidth",
       "compactHeader",
+      "zoomedOverlayAuto",
       "zoomedOverlayScale",
       "roomFocusControls",
       "roomFocusInterval",
@@ -2399,5 +2401,35 @@ describe("minimum overlay width in the display form", () => {
     const form = projectDisplayForm({ ...base, overlayScale: "plan", overlayMinWidth: 800 });
     expect(form.toPatch({ overlayScale: "fixed" })).toEqual({ overlayScale: "fixed" });
     expect(projectDisplayForm({ ...base, overlayScale: "plan" }).data.overlayMinWidth).toBe(0);
+  });
+});
+
+
+describe("growing badges with the room", () => {
+  const base = { type: "t", width: 1000, height: 600 } as FloorplanCardConfig;
+
+  it("offers the multiplier only while it is the thing in charge", () => {
+    expect(projectDisplayForm(base).fields.map((f) => f.name)).toContain("zoomedOverlayScale");
+    // Under `auto` the number would be ignored, so the panel stops offering it.
+    const auto = projectDisplayForm({ ...base, zoomedOverlayScale: "auto" });
+    expect(auto.fields.map((f) => f.name)).not.toContain("zoomedOverlayScale");
+    expect(auto.data.zoomedOverlayAuto).toBe(true);
+  });
+
+  it("shows the default under the toggle rather than a multiplier that is not in force", () => {
+    const auto = projectDisplayForm({ ...base, zoomedOverlayScale: "auto" });
+    expect(auto.data.zoomedOverlayScale).toBe(DEFAULT_ZOOMED_OVERLAY_SCALE);
+    expect(projectDisplayForm({ ...base, zoomedOverlayScale: 2 }).data.zoomedOverlayScale).toBe(2);
+  });
+
+  it("writes the word, and drops the key entirely when turned back off", () => {
+    expect(projectDisplayForm(base).toPatch({ zoomedOverlayAuto: true })).toEqual({
+      zoomedOverlayScale: "auto",
+    });
+    // Off returns to the default, not to a multiplier set before `auto` was —
+    // the slider that comes back would otherwise disagree with the config.
+    expect(
+      projectDisplayForm({ ...base, zoomedOverlayScale: "auto" }).toPatch({ zoomedOverlayAuto: false })
+    ).toEqual({ zoomedOverlayScale: undefined });
   });
 });

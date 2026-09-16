@@ -5092,9 +5092,20 @@ export function resolveAreaZoom(a: Pick<Area, "zoom">): number | undefined {
  * it the moment it was set. A non-finite or non-positive multiplier is
  * ignored for the same reason the transform guards its own scale — this value
  * lands in a custom property that the badge transform is built from.
+ *
+ * `auto` is the multiplier nobody can write down: the zoom itself. Badges then
+ * scale with the drawing, so they are bigger by exactly the factor the room
+ * was zoomed by and no more — which is the one setting that makes a device
+ * easier to read without crowding its neighbours any worse than the full plan
+ * already did. A fixed number cannot express it, because the fitted zoom is a
+ * property of each room's shape: the same 2 that suits a small bathroom
+ * overshoots a living room that only zooms 1.3x, and overshooting is what
+ * makes badges overlap.
  */
-export function zoomedOverlayScale(zoomScale: number, multiplier?: number): number {
+export function zoomedOverlayScale(zoomScale: number, multiplier?: number | "auto"): number {
   if (!Number.isFinite(zoomScale) || zoomScale <= 1) return 1;
+  // Cancel the counter-scale entirely: the overlay rides the zoom transform.
+  if (multiplier === "auto") return 1;
   const m =
     typeof multiplier === "number" && Number.isFinite(multiplier) && multiplier > 0
       ? multiplier

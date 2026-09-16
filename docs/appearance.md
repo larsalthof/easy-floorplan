@@ -549,11 +549,33 @@ card, focusing a room left the badges at 36px and opened the gap between their c
 from 27px to 36px, in step with the 1.32× zoom. That is why focusing helps a crowded
 plan: more space between the same badges, not larger ones.
 
-Raising `zoomedOverlayScale` reverses the trade. At `2` those badges are drawn 72px
-wide with the same 36px between them, so they overlap *worse* than at full plan. Reach
-for it when the card is read from across the room and legibility matters more than
-crowding — a wall tablet — and leave it at `1` when the reason for focusing a room was
-that its devices were on top of each other.
+If what you wanted from zooming was **bigger icons**, that is `zoomedOverlayScale` — but
+a fixed multiplier is the wrong shape for it. At `2` those badges are drawn 72px wide
+with the same 36px between them, so they overlap *worse* than at full plan. The safe
+ceiling is the room's own zoom factor, and that is fitted per room: the `2` that suits a
+small bathroom overshoots a living room that only zooms 1.3×.
+
+`auto` is that ceiling, named:
+
+```yaml
+zoomedOverlayScale: auto   # badges grow with the room, and no further
+```
+
+Badges then ride the zoom transform instead of being counter-scaled against it, so they
+grow by exactly the factor the room grew by. On the same 420px card:
+
+| | Badge width | Gap between centres | Gap ÷ badge |
+| --- | --- | --- | --- |
+| Full plan | 36px | 27.4px | 0.76 |
+| Focused, default `1` | 36px | 36.1px | 1.00 |
+| Focused, `auto` | 47.4px | 36.1px | 0.76 |
+| Focused, `2` | 72px | 36.1px | 0.50 |
+
+`auto` is a third larger and crowds exactly as the full plan did; `2` is twice the size
+and crowds half again as much. Use `auto` when you zoom to read a device, the default
+`1` when you zoom to separate devices that sit on top of each other, and a fixed
+multiplier when a wall tablet is read from across the room and you want to say precisely
+how big.
 
 ## Styling hooks (card-mod)
 

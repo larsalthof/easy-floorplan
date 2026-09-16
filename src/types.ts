@@ -1722,7 +1722,7 @@ export interface FloorplanCardConfig extends LovelaceCardConfig {
    * trackers) so a badge and its label scale as one thing, and only while a
    * room is actually zoomed: at full plan it does nothing at all.
    */
-  zoomedOverlayScale?: number;
+  zoomedOverlayScale?: number | "auto";
   /** Canvas background color (CSS / hex). Falls back to the skin's paper, then the card background. */
   background?: string;
   /**

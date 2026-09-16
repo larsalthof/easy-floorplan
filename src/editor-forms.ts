@@ -2119,12 +2119,19 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
         selector: { boolean: {} },
       },
       {
+        name: "zoomedOverlayAuto",
+        label: "Grow badges with the room",
+        helper:
+          "Badges and labels scale with the drawing while zoomed, so a focused room reads bigger without its devices crowding each other any worse than at full plan",
+        selector: { boolean: {} },
+      },
+      ...(c.zoomedOverlayScale === "auto" ? [] : [{
         name: "zoomedOverlayScale",
         label: "Zoomed badge size",
         helper:
           "Badges, labels and text while zoomed in to a room, as a multiple of their size at full plan. 1 keeps them the same",
         selector: { number: { min: 0.5, max: 3, step: 0.1, mode: "slider" } },
-      },
+      }]),
       {
         name: "roomFocusControls",
         label: "Room arrows",
@@ -2168,7 +2175,11 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
       overlayScale: normalizeOverlayScale(c.overlayScale),
       overlayMinWidth: normalizeOverlayMinWidth(c.overlayMinWidth) ?? 0,
       compactHeader: c.compactHeader ?? false,
-      zoomedOverlayScale: c.zoomedOverlayScale ?? DEFAULT_ZOOMED_OVERLAY_SCALE,
+      zoomedOverlayAuto: c.zoomedOverlayScale === "auto",
+      zoomedOverlayScale:
+        typeof c.zoomedOverlayScale === "number"
+          ? c.zoomedOverlayScale
+          : DEFAULT_ZOOMED_OVERLAY_SCALE,
       roomFocusControls: normalizeRoomFocus(c.roomFocus)?.controls ?? false,
       roomFocusInterval: (normalizeRoomFocus(c.roomFocus)?.intervalMs ?? 0) / 1000,
       offlineStyle: offlineStyleOf(c),
@@ -2206,6 +2217,15 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
       // which is what every plan did before this existed (issue #222).
       if ("zoomedOverlayScale" in out && out.zoomedOverlayScale === DEFAULT_ZOOMED_OVERLAY_SCALE)
         out = { ...out, zoomedOverlayScale: undefined };
+      // The toggle owns the same key: on, it is the word; off, it falls back
+      // to the default rather than to whatever multiplier was there before,
+      // so the slider that reappears and the config agree.
+      if ("zoomedOverlayAuto" in out)
+        out = {
+          ...out,
+          zoomedOverlayScale: out.zoomedOverlayAuto ? "auto" : undefined,
+          zoomedOverlayAuto: undefined,
+        };
       // Two controls over one key (issue #261): the arrows and the dwell are
       // separate choices, and either can arrive on its own, so the half that
       // did not change is read back off the config rather than reset. A tour
