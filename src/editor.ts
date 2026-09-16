@@ -4981,6 +4981,8 @@ export class FloorplanCardEditor extends LitElement {
               "overlayScale",
               "compactHeader",
               "zoomedOverlayScale",
+              "roomFocusControls",
+              "roomFocusInterval",
             ]),
             patch
           )

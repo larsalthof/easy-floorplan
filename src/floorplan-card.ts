@@ -158,6 +158,7 @@ import {
 } from "./projection";
 import { openingSolids } from "./projection-openings";
 import { AmountTween, OPENING_TWEEN_MS, rafTweenFrames } from "./opening-tween";
+import { focusOrder, normalizeRoomFocus, stepFocus } from "./room-focus";
 import type { SVGTemplateResult } from "lit";
 import { symbolCatalog } from "./symbols";
 import { deadSpacesCached } from "./dead-space";
@@ -211,6 +212,8 @@ export class FloorplanCard extends LitElement {
   @state() private _activeFloorId?: string;
   /** View-state: which area (if any) the plan is zoomed in to. Never persisted. */
   @state() private _zoomedAreaId?: string;
+  /** The dwell between rooms while `roomFocus.interval` is cycling. */
+  private _focusTimer?: ReturnType<typeof setTimeout>;
   private readonly _wallMaskId = `fp-wall-mask-${FloorplanCard._nextWallMaskId++}`;
   /**
    * Eased travel for the standing panels (issue #261). The flat view leaves
@@ -381,6 +384,12 @@ export class FloorplanCard extends LitElement {
     if (changed.has("hass") || changed.has("_activeFloorId")) {
       this._syncHistoryServiceContext();
     }
+    // The dwell has to start somewhere, and a config can turn it on or off
+    // under a live card. An interval already counting down is left alone, so
+    // an unrelated state update cannot keep resetting it and stall the tour.
+    const ms = normalizeRoomFocus(this._config?.roomFocus)?.intervalMs ?? 0;
+    if (!ms) this._stopFocusTimer();
+    else if (!this._focusTimer) this._restartFocusTimer();
   }
 
   public getCardSize(): number {
@@ -465,6 +474,73 @@ export class FloorplanCard extends LitElement {
     );
   }
 
+  /** The floor on show: the chosen one, the configured default, or the first. */
+  private _activeFloor(c: FloorplanCardConfig): Floor {
+    const floors = getFloors(c);
+    return (
+      floors.find((f) => f.id === this._activeFloorId) ??
+      floors.find((f) => f.id === c.defaultFloor) ??
+      floors[0]
+    );
+  }
+
+  /**
+   * Walk the zoom to the next room (issue #261). The plan-zoom transition
+   * animates the move, so the view travels rather than cutting — and under the
+   * isometric view it frames the room where it is drawn.
+   */
+  private _stepFocus(step: 1 | -1): void {
+    const c = this._config;
+    if (!c) return;
+    const settings = normalizeRoomFocus(c.roomFocus);
+    const order = focusOrder(this._activeFloor(c).areas, settings);
+    if (!order.length) return;
+    this._zoomedAreaId = stepFocus(order, this._zoomedAreaId, step);
+    this._restartFocusTimer();
+  }
+
+  /**
+   * Start the dwell again from now.
+   *
+   * Called on every step and on any use of the card, which is what keeps a
+   * cycling plan from moving out from under someone mid-tap: the tour only
+   * advances once the card has been left alone for a whole interval.
+   */
+  private _restartFocusTimer(): void {
+    this._stopFocusTimer();
+    const ms = normalizeRoomFocus(this._config?.roomFocus)?.intervalMs ?? 0;
+    if (!ms || !this.isConnected) return;
+    this._focusTimer = setTimeout(() => {
+      this._focusTimer = undefined;
+      this._stepFocus(1);
+    }, ms);
+  }
+
+  private _stopFocusTimer(): void {
+    if (this._focusTimer) clearTimeout(this._focusTimer);
+    this._focusTimer = undefined;
+  }
+
+  /** Arrow keys walk the rooms; Escape is the way back out to the whole plan. */
+  private readonly _onPlanKey = (ev: KeyboardEvent): void => {
+    if (ev.key === "ArrowRight" || ev.key === "ArrowDown") {
+      ev.preventDefault();
+      this._stepFocus(1);
+    } else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      this._stepFocus(-1);
+    } else if (ev.key === "Escape" && this._zoomedAreaId !== undefined) {
+      ev.preventDefault();
+      this._zoomedAreaId = undefined;
+      this._restartFocusTimer();
+    }
+  };
+
+  /** Any use of the card defers the next automatic move. */
+  private readonly _onCardActivity = (): void => {
+    if (this._focusTimer) this._restartFocusTimer();
+  };
+
   private _label(item: FloorItem, renderHass: RenderHass | undefined): string {
     return item.name ?? renderHass?.states[item.entity]?.attributes?.friendly_name ?? item.entity ?? "";
   }
@@ -472,6 +548,7 @@ export class FloorplanCard extends LitElement {
   public disconnectedCallback(): void {
     this._replayController.stopReplayLoop();
     this._openingTween.stop();
+    this._stopFocusTimer();
     // Orientation subscription for the per-screen rotations (issue #237).
     // Folded in here rather than declared as a second `disconnectedCallback`:
     // a class may only have one, and the later declaration would silently
@@ -1182,10 +1259,7 @@ export class FloorplanCard extends LitElement {
     const replayState = this._replayController.getRenderState();
     const renderHass = buildRenderHass(this.hass, this._watchedEntities, this._replayController.historyService(), replayState.enabled, replayState.currentTime);
     const floors = getFloors(c);
-    const active =
-      floors.find((f) => f.id === this._activeFloorId) ??
-      floors.find((f) => f.id === c.defaultFloor) ??
-      floors[0];
+    const active = this._activeFloor(c);
     // Whole-plan display rotation (issue #33): the SVG rotates via one group
     // transform below; the HTML overlay remaps per point in _renderItem /
     // _renderText. Both must use the same mapping (rotatePlanPoint).
@@ -1362,6 +1436,10 @@ export class FloorplanCard extends LitElement {
     // inside one transformed wrapper below, so the two layers — positioned
     // completely differently (a group transform vs. per-point left/top%) —
     // reframe identically instead of drifting apart under zoom.
+    // Stepping the zoom from room to room (issue #261). Ordered here so the
+    // controls, the arrow keys and the dwell all walk the same rooms.
+    const roomFocus = normalizeRoomFocus(c.roomFocus);
+    const focusRooms = focusOrder(active.areas, roomFocus);
     const zoomedArea = active.areas?.find((a) => a.id === this._zoomedAreaId);
     const zoom = zoomedArea
       ? areaZoomTransform(
@@ -1404,6 +1482,8 @@ export class FloorplanCard extends LitElement {
       <ha-card
         .header=${compact ? nothing : (c.title ?? nothing)}
         style=${paletteStyle(c.palette) || nothing}
+        @pointerdown=${this._onCardActivity}
+        @keydown=${this._onCardActivity}
       >
         <div class="card-shell ${this._replayController.isHistoryVisible() ? "replay-visible" : ""}">
           ${this._config.historyReplay?.enabled ? this._renderReplayPanel() : nothing}
@@ -1425,6 +1505,12 @@ export class FloorplanCard extends LitElement {
                and the plan collapses to nothing. -->
           <div
             class="plan ${scale === "plan" ? "scale-plan" : ""}"
+            tabindex=${focusRooms.length > 1 ? "0" : nothing}
+            role=${focusRooms.length > 1 ? "group" : nothing}
+            aria-label=${focusRooms.length > 1
+              ? "Floor plan. Use the arrow keys to move between rooms, Escape to see the whole plan."
+              : nothing}
+            @keydown=${focusRooms.length > 1 ? this._onPlanKey : nothing}
             style="aspect-ratio: ${dims.w} / ${dims.h};
                    width: min(100%, calc(100cqh * ${dims.w} / ${dims.h}));
                    --fp-plan-w: ${dims.w};
@@ -1760,6 +1846,20 @@ export class FloorplanCard extends LitElement {
                 <ha-icon icon="mdi:magnify-minus-outline"></ha-icon>
               </button>`
             : nothing}
+          ${roomFocus?.controls && focusRooms.length > 1
+            ? html`<div class="room-focus" role="group" aria-label="Move between rooms">
+                <button
+                  title="Previous room"
+                  aria-label="Previous room"
+                  @click=${() => this._stepFocus(-1)}
+                >
+                  <ha-icon icon="mdi:chevron-left"></ha-icon>
+                </button>
+                <button title="Next room" aria-label="Next room" @click=${() => this._stepFocus(1)}>
+                  <ha-icon icon="mdi:chevron-right"></ha-icon>
+                </button>
+              </div>`
+            : nothing}
           ${compactTitle ? html`<div class="plan-title">${c.title}</div>` : nothing}
           <!-- Outside the zoom wrapper on purpose, placed or not (issue #281).
                The buttons are how you change floor, and zoom-to-room can scale
@@ -2088,6 +2188,26 @@ export class FloorplanCard extends LitElement {
       .plan-zoom {
         transition: none;
       }
+    }
+    /* The room-focus controls (issue #261), sharing the zoom-out button's look
+       and its corner — it is the same job, one room further along. */
+    .room-focus {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 1;
+      display: flex;
+      gap: 4px;
+    }
+    .room-focus button {
+      cursor: pointer;
+      border: 1px solid var(--divider-color, #ccc);
+      background: var(--card-background-color, #fff);
+      color: var(--primary-text-color);
+      border-radius: 6px;
+      padding: 4px;
+      line-height: 0;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
     }
     .zoom-out {
       position: absolute;

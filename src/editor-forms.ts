@@ -5,6 +5,7 @@
  * the editor owns rendering, history routing, and hass-dependent side
  * effects (device-class inference, grid/snap rescale).
  */
+import { MAX_FOCUS_INTERVAL, normalizeRoomFocus } from "./room-focus";
 import type {
   Area,
   Floor,
@@ -2115,6 +2116,20 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
         selector: { number: { min: 0.5, max: 3, step: 0.1, mode: "slider" } },
       },
       {
+        name: "roomFocusControls",
+        label: "Room arrows",
+        helper:
+          "Previous/next controls that walk the zoom from room to room. They also let the arrow keys do it, which is otherwise impossible — a room that only zooms is not a tab stop",
+        selector: { boolean: {} },
+      },
+      {
+        name: "roomFocusInterval",
+        label: "Cycle rooms every",
+        helper:
+          "Seconds on each room before moving to the next. 0 only ever moves when asked; any tap or key press starts the count again, so it never moves under someone using the card",
+        selector: { number: { min: 0, max: MAX_FOCUS_INTERVAL, step: 1, mode: "box", unit_of_measurement: "s" } },
+      },
+      {
         name: "offlineStyle",
         label: "Offline devices",
         helper: "How a device is drawn when its entity is unavailable or missing",
@@ -2143,6 +2158,8 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
       overlayScale: normalizeOverlayScale(c.overlayScale),
       compactHeader: c.compactHeader ?? false,
       zoomedOverlayScale: c.zoomedOverlayScale ?? DEFAULT_ZOOMED_OVERLAY_SCALE,
+      roomFocusControls: normalizeRoomFocus(c.roomFocus)?.controls ?? false,
+      roomFocusInterval: (normalizeRoomFocus(c.roomFocus)?.intervalMs ?? 0) / 1000,
       offlineStyle: offlineStyleOf(c),
     },
     toPatch: (p) => {
@@ -2176,6 +2193,34 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
       // which is what every plan did before this existed (issue #222).
       if ("zoomedOverlayScale" in out && out.zoomedOverlayScale === DEFAULT_ZOOMED_OVERLAY_SCALE)
         out = { ...out, zoomedOverlayScale: undefined };
+      // Two controls over one key (issue #261): the arrows and the dwell are
+      // separate choices, and either can arrive on its own, so the half that
+      // did not change is read back off the config rather than reset. A tour
+      // written in YAML is carried through — the panel has no field for it,
+      // and editing the dwell must not quietly discard it.
+      if ("roomFocusControls" in out || "roomFocusInterval" in out) {
+        const current = normalizeRoomFocus(c.roomFocus);
+        const controls =
+          "roomFocusControls" in out ? !!out.roomFocusControls : (current?.controls ?? false);
+        const asked =
+          "roomFocusInterval" in out
+            ? Number(out.roomFocusInterval)
+            : (current?.intervalMs ?? 0) / 1000;
+        const interval = Number.isFinite(asked) && asked > 0 ? asked : 0;
+        const rooms = current?.rooms;
+        out = {
+          ...out,
+          roomFocus:
+            !controls && !interval
+              ? undefined
+              : controls && !interval && !rooms?.length
+                ? // The plain case says so plainly.
+                  true
+                : { controls, ...(interval ? { interval } : {}), ...(rooms?.length ? { rooms } : {}) },
+          roomFocusControls: undefined,
+          roomFocusInterval: undefined,
+        };
+      }
       return out;
     },
   };

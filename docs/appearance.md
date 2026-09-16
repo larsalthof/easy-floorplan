@@ -479,6 +479,45 @@ follow-ups.
 For a local preview with simulated entities and view, height, opacity and state
 controls, see [the development preview](../docker/README.md#3d-development-preview).
 
+## Moving between rooms
+
+Tapping a room zooms the plan to it, and tapping it again zooms back out. `roomFocus`
+adds a way to move *between* rooms without aiming at each one:
+
+```yaml
+roomFocus: true        # previous/next controls, and the arrow keys
+```
+
+```yaml
+roomFocus:
+  controls: true       # the arrows; on unless you turn them off
+  interval: 10         # seconds per room before it moves on
+  rooms: [kitchen, living]   # the visiting order, defaulting to the floor's own
+```
+
+The controls step forwards and backwards through the rooms of the floor on show,
+wrapping at both ends. From the whole plan, forwards goes to the first room and
+backwards to the last, so either arrow is a way in. With the controls present the plan
+is also a tab stop: **←/→** (or **↑/↓**) move between rooms and **Escape** returns to the
+whole plan. That is worth having on its own — a room only becomes keyboard-reachable
+when it is given an explicit action, so a room that merely zooms could not be reached
+without a pointer at all.
+
+`interval` turns it into a slow tour for a wall tablet: each room is held for that many
+seconds, then the plan moves on. Any tap or key press starts the count again, so the
+view never moves out from under someone using the card. Set `controls: false` with an
+interval for a display nobody touches. The move itself is the zoom's own transition, so
+it travels rather than cutting — and in the [3D view](#3d-view) it frames each room
+where it is drawn, which makes the tour read as a camera crossing the house.
+
+Two steps of a tour through the demo plan in 3D, taken with the next control:
+
+![Whole plan, then the living room, then the kitchen](img/room-focus-steps.png)
+
+Per-room `zoom` and `zoomedOverlayScale` apply exactly as they do to a tapped room, and
+a device set to [only appear up close](behavior.md#devices-that-only-appear-up-close)
+appears as the tour reaches its room.
+
 ## Styling hooks (card-mod)
 
 Every rendered element carries its config `id` as `data-id`, plus a type class, so

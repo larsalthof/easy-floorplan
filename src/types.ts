@@ -1691,6 +1691,23 @@ export interface FloorplanCardConfig extends LovelaceCardConfig {
    */
   overlayScale?: OverlayScale;
   /**
+   * Move the zoom from room to room (issue #261). `true` puts previous/next
+   * controls on the card and makes the arrow keys walk the rooms — which is
+   * the only way in without a pointer, since a room that merely zooms is not
+   * a tab stop. An object adds a dwell and an explicit tour:
+   *
+   * ```yaml
+   * roomFocus:
+   *   controls: true    # the arrows; on unless turned off
+   *   interval: 10      # seconds per room, omitted for manual only
+   *   rooms: [kitchen]  # visiting order, defaulting to the floor's own
+   * ```
+   *
+   * Cycling never moves the view while someone is using the card: any tap or
+   * key press starts the dwell again. See {@link normalizeRoomFocus}.
+   */
+  roomFocus?: boolean | { controls?: boolean; interval?: number; rooms?: string[] };
+  /**
    * Overlay size while zoomed in to a room, as a multiple of its size at full
    * plan (issue #222). Default {@link DEFAULT_ZOOMED_OVERLAY_SCALE} — no
    * change, which is what zooming has always done. Applies to everything in

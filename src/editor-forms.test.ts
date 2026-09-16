@@ -1240,6 +1240,8 @@ describe("wallForm / projectForm / floorImageForm", () => {
       "overlayScale",
       "compactHeader",
       "zoomedOverlayScale",
+      "roomFocusControls",
+      "roomFocusInterval",
       "offlineStyle",
     ]);
     expect(form.data.rotation).toBe("0");
@@ -2143,6 +2145,8 @@ describe("every field lands in exactly one panel group", () => {
       "overlayScale",
       "compactHeader",
       "zoomedOverlayScale",
+      "roomFocusControls",
+      "roomFocusInterval",
     ];
     const DEVICES = ["offlineStyle"];
     const cfg = { type: "t", width: 1000, height: 600 } as FloorplanCardConfig;
@@ -2320,5 +2324,60 @@ describe("3D display controls", () => {
     expect(form.data).toMatchObject({ wallHeight: 0, wallOpacity: 0 });
     expect(form.toPatch({ wallHeight: 0, wallOpacity: 0 })).toEqual({ wallHeight: 0, wallOpacity: 0 });
     expect(projectDisplayForm(base).fields.map((f) => f.name)).not.toContain("wallHeight");
+  });
+});
+
+
+describe("room focus in the display form", () => {
+  const base = { type: "t", width: 1000, height: 600 } as FloorplanCardConfig;
+
+  it("reads the plain `true` as arrows with no cycling", () => {
+    const form = projectDisplayForm({ ...base, roomFocus: true });
+    expect(form.data.roomFocusControls).toBe(true);
+    expect(form.data.roomFocusInterval).toBe(0);
+  });
+
+  it("writes the plain case plainly, and clears the key when both are off", () => {
+    const form = projectDisplayForm(base);
+    expect(form.data.roomFocusControls).toBe(false);
+    expect(form.toPatch({ roomFocusControls: true })).toEqual({ roomFocus: true });
+    expect(
+      projectDisplayForm({ ...base, roomFocus: true }).toPatch({ roomFocusControls: false })
+    ).toEqual({ roomFocus: undefined });
+  });
+
+  it("keeps the half that did not change, since either control can arrive alone", () => {
+    // Turning the arrows off must not take the cycling with them…
+    const cycling = projectDisplayForm({ ...base, roomFocus: { controls: true, interval: 10 } });
+    expect(cycling.toPatch({ roomFocusControls: false })).toEqual({
+      roomFocus: { controls: false, interval: 10 },
+    });
+    // …nor the other way round.
+    expect(cycling.toPatch({ roomFocusInterval: 0 })).toEqual({ roomFocus: true });
+    const arrows = projectDisplayForm({ ...base, roomFocus: true });
+    expect(arrows.toPatch({ roomFocusInterval: 25 })).toEqual({
+      roomFocus: { controls: true, interval: 25 },
+    });
+  });
+
+  it("carries a YAML-authored tour through an edit the panel cannot see", () => {
+    const form = projectDisplayForm({
+      ...base,
+      roomFocus: { interval: 5, rooms: ["kitchen", "hall"] },
+    });
+    expect(form.toPatch({ roomFocusInterval: 8 })).toEqual({
+      roomFocus: { controls: true, interval: 8, rooms: ["kitchen", "hall"] },
+    });
+    // With everything switched off the key goes entirely, tour included —
+    // there is nothing left for it to describe.
+    expect(form.toPatch({ roomFocusControls: false, roomFocusInterval: 0 })).toEqual({
+      roomFocus: undefined,
+    });
+  });
+
+  it("ignores a dwell that is not a number", () => {
+    const form = projectDisplayForm({ ...base, roomFocus: true });
+    expect(form.toPatch({ roomFocusInterval: "soon" })).toEqual({ roomFocus: true });
+    expect(form.toPatch({ roomFocusInterval: -4 })).toEqual({ roomFocus: true });
   });
 });
