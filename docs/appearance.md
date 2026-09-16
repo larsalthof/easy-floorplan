@@ -539,6 +539,22 @@ Per-room `zoom` and `zoomedOverlayScale` apply exactly as they do to a tapped ro
 a device set to [only appear up close](behavior.md#devices-that-only-appear-up-close)
 appears as the tour reaches its room.
 
+### What focusing a room does to the badges
+
+Worth being precise about, because it is not what "zoom in" suggests: by default
+focusing a room does **not** draw the badges any bigger. `zoomedOverlayScale` is `1`,
+which holds the overlay at the size it has at full plan while the drawing grows
+underneath it — so the badges stay put and move *apart*. On the demo plan in a 420px
+card, focusing a room left the badges at 36px and opened the gap between their centres
+from 27px to 36px, in step with the 1.32× zoom. That is why focusing helps a crowded
+plan: more space between the same badges, not larger ones.
+
+Raising `zoomedOverlayScale` reverses the trade. At `2` those badges are drawn 72px
+wide with the same 36px between them, so they overlap *worse* than at full plan. Reach
+for it when the card is read from across the room and legibility matters more than
+crowding — a wall tablet — and leave it at `1` when the reason for focusing a room was
+that its devices were on top of each other.
+
 ## Styling hooks (card-mod)
 
 Every rendered element carries its config `id` as `data-id`, plus a type class, so
