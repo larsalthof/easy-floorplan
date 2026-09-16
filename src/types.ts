@@ -1708,6 +1708,13 @@ export interface FloorplanCardConfig extends LovelaceCardConfig {
    */
   roomFocus?: boolean | { controls?: boolean; interval?: number; rooms?: string[] };
   /**
+   * Under `overlayScale: plan`, size the overlay as though the displayed plan
+   * were at least this wide (px). All overlay measures stop shrinking together.
+   * Unset or zero keeps normal scaling; ignored in fixed-pixel mode.
+   * Below this width labels can overlap as the drawing continues shrinking.
+   */
+  overlayMinWidth?: number;
+  /**
    * Overlay size while zoomed in to a room, as a multiple of its size at full
    * plan (issue #222). Default {@link DEFAULT_ZOOMED_OVERLAY_SCALE} — no
    * change, which is what zooming has always done. Applies to everything in
