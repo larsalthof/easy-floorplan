@@ -130,4 +130,13 @@ describe("stepping the focus between rooms", () => {
     await t.card.updateComplete;
     expect(t.focused()).toBe("living");
   });
+
+  it("takes up a new interval straight away rather than after the old dwell", async () => {
+    const t = await mount({ controls: false, interval: 60 });
+    t.card.setConfig(config({ controls: false, interval: 2 }));
+    await t.card.updateComplete;
+    await new Promise((r) => setTimeout(r, 2300));
+    await t.card.updateComplete;
+    expect(t.focused()).toBe("hall");
+  });
 });

@@ -219,6 +219,8 @@ export class FloorplanCard extends LitElement {
   @state() private _zoomedAreaId?: string;
   /** The dwell between rooms while `roomFocus.interval` is cycling. */
   private _focusTimer?: ReturnType<typeof setTimeout>;
+  /** The interval {@link _focusTimer} was armed with, to notice a config that changes it. */
+  private _focusTimerMs = 0;
   private readonly _wallMaskId = `fp-wall-mask-${FloorplanCard._nextWallMaskId++}`;
   /**
    * Eased travel for the standing panels (issue #261). The flat view leaves
@@ -391,10 +393,12 @@ export class FloorplanCard extends LitElement {
     }
     // The dwell has to start somewhere, and a config can turn it on or off
     // under a live card. An interval already counting down is left alone, so
-    // an unrelated state update cannot keep resetting it and stall the tour.
+    // an unrelated state update cannot keep resetting it and stall the tour —
+    // unless the config has changed the interval itself, which would otherwise
+    // wait out the old dwell first.
     const ms = normalizeRoomFocus(this._config?.roomFocus)?.intervalMs ?? 0;
     if (!ms) this._stopFocusTimer();
-    else if (!this._focusTimer) this._restartFocusTimer();
+    else if (!this._focusTimer || ms !== this._focusTimerMs) this._restartFocusTimer();
   }
 
   public getCardSize(): number {
@@ -515,6 +519,7 @@ export class FloorplanCard extends LitElement {
     this._stopFocusTimer();
     const ms = normalizeRoomFocus(this._config?.roomFocus)?.intervalMs ?? 0;
     if (!ms || !this.isConnected) return;
+    this._focusTimerMs = ms;
     this._focusTimer = setTimeout(() => {
       this._focusTimer = undefined;
       this._stepFocus(1);
