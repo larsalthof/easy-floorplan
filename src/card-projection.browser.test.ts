@@ -149,10 +149,18 @@ describe("3D card integration", () => {
     }
   });
 
-  it("retains flat opening controls at zero wall height", async () => {
-    const { root } = await mount({ wallHeight: 0 });
+  it("draws the flat plan on an isometric floor at zero wall height", async () => {
+    const { root, card } = await mount({ wallHeight: 0 });
     expect(root.querySelector(".fp-door-leaf")).not.toBeNull();
     expect(root.querySelector(".fp-iso-opening-hit")).toBeNull();
+    // Walls and furniture are the flat plan's own, not boxes with no height.
+    expect(root.querySelector(".fp-iso")).toBeNull();
+    expect(root.querySelectorAll(".fp-wall")).toHaveLength(4);
+    expect(root.querySelector(".fp-furniture")).not.toBeNull();
+    // Nothing stands, so nothing travels: the leaf's CSS transition has it.
+    card.hass = hass(true);
+    await card.updateComplete;
+    expect((card as unknown as { _openingTween: { running: boolean } })._openingTween.running).toBe(false);
   });
 
   it("stands a rectangle room's walls up, and leaves its dividers on the floor", async () => {

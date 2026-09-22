@@ -1278,8 +1278,12 @@ export class FloorplanCard extends LitElement {
     // instead of being drawn flat. The sun dimming has to reach the tops of
     // the walls too, which lie `wallHeight` outside the plan rectangle.
     const iso = frame.projection === "iso";
-    // Nothing to travel while the plan is flat: the leaf's CSS transition has it.
-    if (!iso) this._openingTween.stop();
+    // Whether anything actually stands. At zero height the isometric floor
+    // keeps the flat plan's own walls, furniture and opening symbols, and the
+    // standing layer is skipped outright rather than drawn with no height.
+    const standing = iso && frame.wallHeight > 0;
+    // Nothing to travel while nothing stands: the leaf's CSS transition has it.
+    if (!standing) this._openingTween.stop();
     const projTransform = planProjectionTransform(frame);
     const dimPad = WALL_THICKNESS + (iso ? frame.wallHeight : 0);
     // One furniture glyph, flat. Drawn on the floor on the flat plan and on
@@ -1405,8 +1409,8 @@ export class FloorplanCard extends LitElement {
     const roomWallSegments = [...active.walls, ...generatedRoomWalls];
     // In 3D a divider stays a line on the floor: it marks where one room ends,
     // not a wall, so it is the one segment that does not stand up.
-    const standingWallSegments = iso ? roomWallSegments.filter((w) => !w.divider) : [];
-    const flatWallSegments = iso ? roomWallSegments.filter((w) => w.divider) : [];
+    const standingWallSegments = standing ? roomWallSegments.filter((w) => !w.divider) : [];
+    const flatWallSegments = standing ? roomWallSegments.filter((w) => w.divider) : [];
     const blockingWallSegments = wallsThatBlock(
       generatedRoomWalls.some((w) => w.divider)
         ? roomWallSegments.filter((w) => !w.divider)
@@ -1651,7 +1655,7 @@ export class FloorplanCard extends LitElement {
                   : nothing;
               })}
             </g>
-            ${iso ? nothing : active.furniture.map(drawFurniture)}
+            ${standing ? nothing : active.furniture.map(drawFurniture)}
             <!-- Sunlight through the openings. Under the walls on purpose:
                  light lands on the floor, and the walls stay crisp lines over
                  it rather than being tinted by the patches they let in. The
@@ -1732,7 +1736,7 @@ export class FloorplanCard extends LitElement {
                 : nothing
             }
             ${renderWallMask(active.openings, c.width, c.height, this._wallMaskId)}
-            ${(iso ? flatWallSegments : roomWallSegments).map(
+            ${(standing ? flatWallSegments : roomWallSegments).map(
                 (w) => svg`
                 <g class="fp-wall-neon"><line x1=${w.x1} y1=${w.y1} x2=${w.x2} y2=${w.y2}
                       class="wall fp-wall ${isRailing(w) ? "railing" : ""}"
@@ -1763,7 +1767,7 @@ export class FloorplanCard extends LitElement {
               // Unkeyed, Lit morphs floor A's openings into floor B's, and the
               // 0.5s leaf/panel transitions animate the leftover state — a
               // window briefly plays a door swing (issue #50).
-              iso && frame.wallHeight > 0 ? [] : active.openings,
+              standing ? [] : active.openings,
               (o, i) => o.id || i,
               (o) => {
               const symbol = renderOpening(o, this._openingStyle(o, renderHass));
@@ -1813,7 +1817,7 @@ export class FloorplanCard extends LitElement {
                  the canvas, and without it every tappable opening underneath
                  stops responding (the lesson from #108). -->
             </g>
-            ${iso
+            ${standing
               ? this._renderIsoLayer(active, standingWallSegments, c, rot, frame, rotTransform, drawFurniture, furnitureTone, renderHass,
                   // Scrubbing history jumps from state to state on purpose;
                   // easing between them would trail the scrubber.

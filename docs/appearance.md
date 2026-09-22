@@ -540,7 +540,8 @@ selecting a view in the editor removes the old alias.
   standing in the wall plane fades together, doors and shutters included, while
   glass keeps its own tint and furniture stays solid inside the room. Height remains
   a fixed 60 canvas units by default while we experiment with different plan sizes.
-  Zero height gives an isometric floor with the flat opening symbols.
+  Zero height lays the flat plan on an isometric floor: walls, furniture and opening
+  symbols drawn exactly as the 2D view draws them.
 
 Screenshots from the standalone preview with simulated entities and placeholder
 icons (`wallHeight: 60`, `wallOpacity: 0.65`):
