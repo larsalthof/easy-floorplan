@@ -515,7 +515,8 @@ rotation: 90     # optional: choose the viewing corner
 The prototype's `projection: iso` still works. An explicit `view` takes precedence;
 selecting a view in the editor removes the old alias.
 
-- Walls stand above the floor and leave gaps for doors and windows. Swinging leaves,
+- Walls stand above the floor and leave gaps for doors and windows. A rectangle room's
+  own walls stand with them; its dividers stay dashed lines on the floor. Swinging leaves,
   sliding panels, roll-up curtains and awning windows now stand in those gaps and
   update with their entities, including partial positions, independent second leaves,
   and external shutters. The same opening actions work in either view. A panel

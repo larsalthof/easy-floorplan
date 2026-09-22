@@ -154,4 +154,18 @@ describe("3D card integration", () => {
     expect(root.querySelector(".fp-door-leaf")).not.toBeNull();
     expect(root.querySelector(".fp-iso-opening-hit")).toBeNull();
   });
+
+  it("stands a rectangle room's walls up, and leaves its dividers on the floor", async () => {
+    const nook = {
+      id: "nook",
+      points: [{ x: 0, y: 0 }, { x: 150, y: 0 }, { x: 150, y: 120 }, { x: 0, y: 120 }],
+      sideWalls: { right: "wall", bottom: "divider" },
+    };
+    const { root } = await mount({ areas: [...config().areas!, nook] } as Partial<FloorplanCardConfig>);
+    expect(root.querySelector('.fp-iso-wall[data-id="area-wall-nook-right"]')).not.toBeNull();
+    expect(root.querySelector('.fp-iso-wall[data-id="area-wall-nook-bottom"]')).toBeNull();
+    // The divider is still drawn, as the dashed line it is in the flat view.
+    expect(root.querySelector('.fp-wall[data-id="area-wall-nook-bottom"]')).not.toBeNull();
+    expect(root.querySelector('.fp-wall[data-id="area-wall-nook-right"]')).toBeNull();
+  });
 });
