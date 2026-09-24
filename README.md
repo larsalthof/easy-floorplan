@@ -36,6 +36,7 @@ screen size.
 - 📊 **Many readings, one device** — a sensor that reports temperature, humidity and pressure needs one badge, not three. Add entities one at a time; they show whether or not the device's own state does, so a smart plug can label itself `1.2 kW · 84 · 5 min ago` while the badge colour carries the on/off. The label can sit below, left or right of the badge.
 - 🚪 **Animated doors & windows** — bind a contact `binary_sensor`, `cover` or `lock` and openings swing, slide or roll with their real state, partial positions included. A lock reads `unlocked` as open, so a door with no contact sensor still animates.
   - 🆕 **Top-hinged (awning) windows** — hinged at the head, swinging out at the sill. Drawn the way a plan draws them: the sash edge-on as a blade projecting from the wall, hinges marked on the wall line, the glass it left behind broken. `flipV` turns it into a bottom-hinged hopper opening inward. See [Top-hinged windows](https://github.com/nicosandller/easy-floorplan/blob/main/docs/appearance.md#top-hinged-windows).
+  - 🆕 **Skylights** — a velux, a roof light, a lantern: a hole in the *ceiling*, so it snaps to no wall, has two sides rather than one, and lays a patch of sun that lands a way off downwind of itself — as far as the ceiling is high over the tangent of the sun's angle, which is why a midday sun drops it almost straight down and an evening one throws it across the room. It is glass, so what darkens the room under it is the blind, drawn across the glass at whatever fraction the cover reports. See [Skylights](https://github.com/nicosandller/easy-floorplan/blob/main/docs/lighting.md#skylights).
   - **A sensor per leaf** — anything with two leaves takes a second contact and draws them independently: a casement window with one sash open and one shut, a double door ajar on one side, a pair of shutters with one folded back.
 - 🎯 **Colors for on *and* off** 🆕 — a badge could always say what colour it is when on, and nothing about when it is off; a closed door was a line the colour of the wall. `inactiveColor` is the counterpart, on devices and openings both, so the valve that is shut is the one that catches your eye. It means off for every domain at once — `locked`, `closed`, `docked` — which a hand-written state rule cannot. See [Colors for on and off](https://github.com/nicosandller/easy-floorplan/blob/main/docs/behavior.md#colors-for-on-and-off).
 - 📴 **Offline devices read as offline** — an entity that is unavailable, unknown, or gone from Home Assistant is dimmed (or crossed out), instead of looking exactly like a device someone switched off.
@@ -50,6 +51,9 @@ screen size.
 <img width="444" height="313" alt="night" src="https://github.com/user-attachments/assets/1590b710-d88f-4a34-986b-b08640a45f4c" />
 
 
+- 🛋️ **Furniture that does something** 🆕 — tap, hold and double-tap actions on any piece, the same ones a room has. A staircase can keep changing floor on tap and open more-info on hold. See [Actions on furniture](https://github.com/nicosandller/easy-floorplan/blob/main/docs/behavior.md#actions-on-furniture).
+- 🧭 **Put the floor switcher anywhere** 🆕 — the floor buttons were pinned to the top-right corner, which on a dense plan sits over the drawing. Drag them onto whatever part of your plan is empty; the position is in canvas units, so it holds at any card size. See [Where the floor switcher sits](https://github.com/nicosandller/easy-floorplan/blob/main/docs/appearance.md#where-the-floor-switcher-sits).
+- 🌇 **Balcony railings** 🆕 — mark a wall as a railing and it's drawn thin, lamp light and sunlight carry on over it, and it seals off no dead space. A balcony stops being a sealed box that shades its own door. See [Balcony railings](https://github.com/nicosandller/easy-floorplan/blob/main/docs/appearance.md#balcony-railings).
 - 🏢 **Multiple floors** — per-floor elements with a switcher in both the editor and the card. Give a staircase `goToFloor: up` and clicking it takes you there.
 - 🖼️ **Background image** — trace over a floor-plan scan, per floor, with adjustable opacity.
 - 🏷️ **Named colors** 🆕 — name a colour once under Project and point any colour field at it from a dropdown, instead of copying the same hex into every sensor that uses it. Recolour the name and everything using it follows; rename or delete it and nothing breaks. See [Named colors](https://github.com/nicosandller/easy-floorplan/blob/main/docs/appearance.md#named-colors).
@@ -95,7 +99,7 @@ HACS adds the dashboard resource automatically.
 | --- | --- | --- |
 | 🎥 | **[Video walkthrough](https://youtu.be/M-b7xK-4Bpw)** | Setting the card up end to end — a community guide, in Italian 🇮🇹 |
 | ⚙️ | **[Configuration](https://github.com/nicosandller/easy-floorplan/blob/main/docs/configuration.md)** | Every config key: per-element tables, defaults, a worked example |
-| 💡 | **[Lighting](https://github.com/nicosandller/easy-floorplan/blob/main/docs/lighting.md)** | Follow the sun, and real sunlight through the windows |
+| 💡 | **[Lighting](https://github.com/nicosandller/easy-floorplan/blob/main/docs/lighting.md)** | Follow the sun, and real sunlight through the windows and skylights |
 | 🎨 | **[Appearance](https://github.com/nicosandller/easy-floorplan/blob/main/docs/appearance.md)** | Skins, overlay scale, rotation, and card-mod styling hooks |
 | ⚡ | **[Behaviour](https://github.com/nicosandller/easy-floorplan/blob/main/docs/behavior.md)** | What elements do once an entity is bound |
 | 🐳 | **[Local Home Assistant](https://github.com/nicosandller/easy-floorplan/blob/main/docker/README.md)** | Running the card against a real instance in Docker |
@@ -106,7 +110,8 @@ Below: what you can put on a plan, and links to the guide for each feature.
 
 ## Elements
 
-Everything you place on the plan is an **element**: **devices**, **doors & windows**,
+Everything you place on the plan is an **element**: **devices**, **doors, windows &
+skylights**,
 **furniture**, **text**, **areas** and **trackers**. Select, move, nudge, copy/paste,
 duplicate and delete them; each floor holds its own set.
 
@@ -130,7 +135,8 @@ then pick the entity in the **Element** section below the canvas.
   [More readings per device](https://github.com/nicosandller/easy-floorplan/blob/main/docs/configuration.md#more-readings-per-device).
 - **Label position** — **Below** the badge (the default), or hung off its **left** or
   **right**. A reading under a badge grows in both directions and meets whatever sits
-  beside it; hung off one side it grows one way only.
+  beside it; hung off one side it grows one way only. Left and right hold their place
+  when the badge is set to show nothing.
 - **Disable label color** — an item's label normally follows the same state and active
   color rules its badge does. That is useful as a status cue and awkward when it hurts
   readability or fights a deliberately plain dashboard, so this pins the text to the
@@ -222,13 +228,20 @@ hardest to check.
 With the OS *reduce motion* preference set, all three fall back to the flash halo with no
 transition: the affordance stays, the movement goes.
 
-#### Doors & windows
+#### Doors, windows & skylights
 
-Drop a **door** or **window** from the toolbar and it snaps onto the nearest wall. Left
+Drop a **door** or **window** from the toolbar and it snaps onto the nearest wall. A
+**skylight** is the exception: it is a hole in the ceiling, so it snaps to nothing —
+click anywhere inside a room and it stays where you put it. It is also the one opening
+with two sizes, **Length** and **Width**, both settable in the toolbar before you place
+it. Left
 unbound it stays a static drawing. Bind an **Entity** — a contact `binary_sensor` or a
-`cover` — and the opening tracks its real state. The card reads the entity's HA
-`device_class` and picks a sensible `type` / `motion` for you (a `window` cover → a
-window, a `blind` → a slider, a `garage` or `shutter` → a roll-up); adjust afterwards.
+`cover` — and the opening tracks its real state. For a **wall** opening the card reads
+the entity's HA `device_class` and picks a sensible `type` / `motion` for you (a `window`
+cover → a window, a `blind` → a slider, a `garage` or `shutter` → a roll-up); adjust
+afterwards. A **skylight** is exempt, and has to be: Home Assistant has no roof-window
+class, so a velux binds to a `cover` with `device_class: window` — the very class that
+would turn it back into a wall opening. A type you chose by hand is never overruled.
 
 - **Open / closed** — open when the entity is `on` / `open`. A door's leaf swings around
   its hinge, a window's two leaves outward from the middle — or set **Sashes** to *Single*
@@ -289,6 +302,10 @@ window, a `blind` → a slider, a `garage` or `shutter` → a roll-up); adjust a
   swung is still on screen saying so. The roll-up is the case that wants it — raised, its
   curtain has left the floor plane and only the coloured track remains. With a shutter
   bound too, the two badges take opposite faces of the wall.
+- **Shutter icon** — the same badge for the shutter's entity, and its dialog on a tap. On by
+  default when the opening has its own entity too, since it's how you find the second one.
+  Off for a shutter bound alone — switch it on for a roll-up shutter without a window
+  contact behind it, whose raised curtain leaves only its track line.
 - **Invert door animation** (**Invert window animation** on a window) — flip the
   open/closed interpretation (and the percentage) for sensors wired the other way. A bound
   shutter gets its own **Invert shutter animation**, since a reed contact on the panels
@@ -319,11 +336,13 @@ openings:
 
 An **area** is a colored, named room polygon traced on top of your walls.
 
-Pick the **Area** tool and click each corner — points snap onto nearby wall corners and
-onto other areas' corners, so adjoining rooms share an exact boundary. After 3+ points,
-click the **first** point to close the shape (**Backspace** drops the last point,
+Choose the **Area** tool and either press-drag to make a finished rectangle in one
+gesture or click each corner for a custom polygon — points snap onto nearby wall corners
+and onto other areas' corners, so adjoining rooms share an exact boundary. After 3+
+points, click the **first** point to close the shape (**Backspace** drops the last point,
 **Escape** discards the outline). Drag inside the fill to move the room, or a corner
-handle to reshape it.
+handle to reshape it. Double-click a rectangle room's edge to cycle it through
+**wall → divider → none**.
 
 Selected, an area offers **Name** / **Show name**, a **color** and **Fill opacity**, and —
 once it's live — the same conditional coloring devices get: **Entity**, **Active color**,
@@ -449,7 +468,7 @@ Everything the card does beyond placing elements, in four guides:
 | | | |
 | --- | --- | --- |
 | ⚙️ | **[Configuration](https://github.com/nicosandller/easy-floorplan/blob/main/docs/configuration.md)** | Every key it accepts — per-element tables, defaults, a worked example |
-| 💡 | **[Lighting](https://github.com/nicosandller/easy-floorplan/blob/main/docs/lighting.md)** | Sun dimming through dusk and dawn · real sunlight through the windows |
+| 💡 | **[Lighting](https://github.com/nicosandller/easy-floorplan/blob/main/docs/lighting.md)** | Sun dimming through dusk and dawn · real sunlight through the windows · skylights · diffuse ambient daylight |
 | 🎨 | **[Appearance](https://github.com/nicosandller/easy-floorplan/blob/main/docs/appearance.md)** | Skins · overlay scale · compact header · rotation · card-mod hooks |
 | ⚡ | **[Behaviour](https://github.com/nicosandller/easy-floorplan/blob/main/docs/behavior.md)** | Dead spaces · doors on locks · room actions · devices that only appear up close · stairs between floors · offline devices · hiding logic |
 
@@ -457,10 +476,11 @@ Everything the card does beyond placing elements, in four guides:
 
 ```bash
 npm install
-npm run build   # bundles to dist/easy-floorplan-card.js
-npm run watch   # rebuild on change
-npm test        # node suite
-npm run ha      # a real Home Assistant in Docker, with a seeded demo plan
+npm run build         # bundles to dist/easy-floorplan-card.js
+npm run watch         # rebuild on change
+npm test              # node suite
+npm run test:browser  # browser suite
+npm run ha            # a real Home Assistant in Docker, with a seeded demo plan
 ```
 
 Build and test commands, and which of the two test suites a change needs, are in

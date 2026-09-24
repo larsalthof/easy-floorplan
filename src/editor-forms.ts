@@ -5,6 +5,7 @@
  * the editor owns rendering, history routing, and hass-dependent side
  * effects (device-class inference, grid/snap rescale).
  */
+import { MAX_FOCUS_INTERVAL, normalizeRoomFocus } from "./room-focus";
 import type {
   Area,
   Floor,
@@ -50,9 +51,13 @@ import {
   domainIconAnimation,
   isRippleEntity,
   normalizeOverlayScale,
+  normalizeOverlayMinWidth,
+  MAX_OVERLAY_MIN_WIDTH,
   normalizePlanRotation,
   openingActionForGesture,
   openingMotion,
+  skylightWidth,
+  skylightCeilingHeight,
   MIN_SASH_SPAN,
   openingHasTwoLeaves,
   sliderStyleHasTwoLeaves,
@@ -63,12 +68,14 @@ import {
   offlineStyleOf,
   sliderStyleOf,
   shutterStyleOf,
+  shutterMarkDefault,
   DEFAULT_SUN_BEARING,
   SUN_REACH,
   openingSash,
   defaultSash,
   openingIsGlazed,
 } from "./render";
+import { normalizeProjection, normalizeWallHeight, normalizeWallOpacity, MAX_WALL_HEIGHT } from "./projection";
 import { defaultItemAction } from "./actions";
 import { DEFAULT_SKIN, SKINS, findSkin, MAX_SKIN_WALL_WIDTH } from "./skins";
 
@@ -234,9 +241,24 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
   const motion = openingMotion(o);
   const style = sliderStyleOf(o);
   const twoLeaves = openingHasTwoLeaves(o);
+  // A roof window answers a different set of questions from a wall one, and
+  // the interesting part is which questions it does *not* answer: motion (it
+  // is top-hung and cannot be anything else), leaves, sash width, hinge jamb,
+  // slide direction and slider style all describe a sash travelling across a
+  // floor, which is not a thing a hole in a ceiling has. Left in, every one of
+  // them would have been a control that changed nothing on screen.
+  //
+  // What it gains is a second side and a ceiling height — see below.
+  const skylight = o.type === "skylight";
   const fields: FormField[] = [
-    { name: "type", label: "Type", selector: dropdown(opt("door", "Door"), opt("window", "Window")) },
     {
+      name: "type",
+      label: "Type",
+      selector: dropdown(opt("door", "Door"), opt("window", "Window"), opt("skylight", "Skylight")),
+    },
+  ];
+  if (!skylight) {
+    fields.push({
       name: "motion",
       label: "Motion",
       selector: dropdown(
@@ -257,13 +279,41 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
           ? [opt("fixed", "Fixed (does not open)"), opt("awning", "Top-hinged (awning)")]
           : [])
       ),
-    },
-    { name: "length", label: "Length", required: true, selector: { number: { min: 1, mode: "box" } } },
-  ];
+    });
+  }
+  fields.push({
+    name: "length",
+    label: "Length",
+    helper: skylight ? "The roof window's long side" : undefined,
+    required: true,
+    selector: { number: { min: 1, mode: "box" } },
+  });
+  if (skylight) {
+    // The second side. Only a skylight has one, and it is not optional in any
+    // useful sense — a rectangle needs both — so it sits next to the length
+    // rather than under a fold.
+    fields.push({
+      name: "width",
+      label: "Width",
+      helper: "The short side; the patch of sun it lays is this rectangle, moved",
+      required: true,
+      selector: { number: { min: 1, mode: "box" } },
+    });
+    // How far the light slides on the way down. A slider rather than a box
+    // because it is a judgement about how the plan reads, not a measurement:
+    // the plan has no vertical unit, so what this scales is the distance
+    // between the roof light and its patch. See Opening.ceilingHeight.
+    fields.push({
+      name: "ceilingHeight",
+      label: "Ceiling height",
+      helper: "1 is an ordinary storey; higher throws the patch of sun further across the room",
+      selector: { number: { min: 0.2, max: 4, step: 0.1, mode: "slider" } },
+    });
+  }
   // Leaf count, for anything hinged. Offered on doors too: a double door is
   // as ordinary as a double casement, and was previously undrawable — every
   // door came out as one leaf spanning the whole opening, however wide.
-  if (motion === "swing") {
+  if (!skylight && motion === "swing") {
     const door = o.type === "door";
     fields.push({
       name: "sash",
@@ -297,14 +347,24 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
       selector: { number: { min: MIN_SASH_SPAN, max: 1, step: 0.05, mode: "slider" } },
     });
   }
-  // Glass, for a door. A window never needs asking, and the only thing that
-  // reads it is the sunlight — a patio door left opaque keeps the sunniest
-  // side of a house dark.
-  if (o.type === "door") {
+  // Glass, for a door and for a skylight. A window never needs asking, and
+  // the only thing that reads it is the sunlight — a patio door left opaque
+  // keeps the sunniest side of a house dark.
+  //
+  // The two are offered for opposite reasons, which is why they are worded
+  // differently. A door is opaque and this is how you say it is not. A
+  // skylight is glass and this is how you say it is not — the roof hatch, the
+  // loft door, the smoke vent — and it is also the answer to the question
+  // everyone asks first: bind the sash to a cover, notice the light does not
+  // change, and this is why. Glazed, only the blind can darken the room,
+  // which is the truth about a velux; switched off, the sash itself does.
+  if (o.type === "door" || skylight) {
     fields.push({
       name: "glazed",
       label: "Glazed",
-      helper: "Lets sunlight through even when shut — a patio or French door",
+      helper: skylight
+        ? "On (a roof window): only the blind stops the light. Off (a hatch): the sash does"
+        : "Lets sunlight through even when shut — a patio or French door",
       selector: { boolean: {} },
     });
   }
@@ -326,14 +386,26 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
       selector: dropdown(opt("left", "Left"), opt("right", "Right")),
     });
   }
-  if (motion === "swing") {
+  if (!skylight && motion === "swing") {
     fields.push({
       name: "opens",
       label: "Opens",
       selector: dropdown(opt("this", "This side"), opt("other", "Other side")),
     });
   }
-  if (motion === "slide") {
+  // The same flag under a name that means something for a roof window. A
+  // velux is hung at one edge and the sash foreshortens toward it as it opens
+  // — and the blind rolls down from the same edge — so which edge it is, is
+  // visible in the symbol and worth being able to turn.
+  if (skylight) {
+    fields.push({
+      name: "opens",
+      label: "Hinged at",
+      helper: "Which edge the sash is hung from, and the edge its blind comes down from",
+      selector: dropdown(opt("this", "Top edge"), opt("other", "Bottom edge")),
+    });
+  }
+  if (!skylight && motion === "slide") {
     // A two-panel slider moves both ways at once, so there is no direction to
     // pick — `flipH` only swaps which panel each sensor drives (issue #145).
     if (!twoLeaves) {
@@ -361,9 +433,17 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
     // Says locks are usable, because nothing else would: a lock is neither a
     // contact nor a cover, and its states are `locked` / `unlocked` rather
     // than anything that looks like open/closed (issue #176).
-    helper: twoLeaves
-      ? "Contact, cover or lock. Drives the first leaf; type and motion follow its device class"
-      : "Contact, cover or lock — a lock reads unlocked as open. Type and motion follow its device class",
+    // The device-class promise is a wall opening's. A skylight is deliberately
+    // exempt from that inference (see `editor.ts`, where the guard is) —
+    // Home Assistant has no roof-window class, so a velux binds to a `cover`
+    // with `device_class: window`, the very class that would turn it back into
+    // one. Repeating the promise here told a skylight author the opposite of
+    // what the card does.
+    helper: skylight
+      ? "Contact or cover for the sash. A roof window keeps its type whatever the entity's device class says"
+      : twoLeaves
+        ? "Contact, cover or lock. Drives the first leaf; type and motion follow its device class"
+        : "Contact, cover or lock — a lock reads unlocked as open. Type and motion follow its device class",
     selector: { entity: { filter: [{ domain: OPENING_ENTITY_DOMAINS }] } },
   });
   // One sensor per leaf (issues #145, #159). Only a two-leaved opening has a
@@ -383,21 +463,33 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
   // sensors belong in the picker next to covers (issue #74).
   fields.push({
     name: "shutterEntity",
-    label: "Shutter",
-    helper: "External shutter over this opening — a cover, or a contact sensor",
+    label: skylight ? "Blind" : "Shutter",
+    helper: skylight
+      // Named for what it is on a roof window, and sold on what it does: with
+      // the glass left glazed this is the only thing in the plan that can
+      // darken the room under it.
+      ? "Blackout blind over the glass — a cover, or a contact sensor. This is what stops the light"
+      : "External shutter over this opening — a cover, or a contact sensor",
     selector: { entity: { filter: [{ domain: ["cover", "binary_sensor"] }] } },
   });
   if (o.shutterEntity) {
-    fields.push({
-      name: "shutterStyle",
-      label: "Shutter type",
-      helper: "Hinged panels fold back against the wall; roll-up slats disappear upward",
-      selector: dropdown(opt("swing", "Hinged (louvered panels)"), opt("roll", "Roll-up (slats)")),
-    });
+    // A roof window's blind has one shape and one direction: a sheet drawn
+    // down over the glass from the head. There is no hinged variant to pick (a
+    // shutter that folds back against a roof is not a thing), no side of a
+    // wall to hang it on, and so no second panel to bind either — which is
+    // why the next three fields are the wall opening's alone. Inverting it
+    // is not: a contact on a roof blind reads backwards exactly as often.
+    if (!skylight)
+      fields.push({
+        name: "shutterStyle",
+        label: "Shutter type",
+        helper: "Hinged panels fold back against the wall; roll-up slats disappear upward",
+        selector: dropdown(opt("swing", "Hinged (louvered panels)"), opt("roll", "Roll-up (slats)")),
+      });
     // Which face of the wall hinged panels hang on. Only asked for hinged
     // shutters: the roll curtain is drawn symmetrically about the wall line,
     // so the answer would change nothing on screen.
-    if (shutterStyleOf(o) === "swing") {
+    if (!skylight && shutterStyleOf(o) === "swing") {
       fields.push({
         name: "shutterSide",
         label: "Shutter side",
@@ -408,7 +500,7 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
     // One contact per shutter panel (issue #159), on the same terms as the
     // opening's own second leaf above: only a hinged pair *has* a second panel
     // — a roll curtain is one piece — and only once the first is bound.
-    if (shutterStyleOf(o) === "swing") {
+    if (!skylight && shutterStyleOf(o) === "swing") {
       fields.push({
         name: "shutterSecondaryEntity",
         label: "Second shutter panel",
@@ -423,7 +515,7 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
     // "Invert" / "Invert shutter" left you guessing which was which.
     fields.push({
       name: "shutterInvert",
-      label: "Invert shutter animation",
+      label: skylight ? "Invert blind animation" : "Invert shutter animation",
       selector: { boolean: {} },
     });
   }
@@ -435,11 +527,17 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
   // unbound door can be drawn shut, or an unbound window drawn open.
   fields.push({
     name: "invert",
-    label: o.type === "door" ? "Invert door animation" : "Invert window animation",
+    label:
+      o.type === "door"
+        ? "Invert door animation"
+        : skylight
+          ? "Invert skylight animation"
+          : "Invert window animation",
     helper: o.entity
       ? undefined
       : // Only a swing door draws open with no sensor to ask
-        // (openingDefaultOpen) — everything else, door or window, draws shut.
+        // (openingDefaultOpen) — everything else, door, window or roof light,
+        // draws shut.
         o.type === "door" && openingMotion(o) === "swing"
         ? "No sensor bound — draws shut instead of open"
         : "No sensor bound — draws open instead of shut",
@@ -471,23 +569,24 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
       });
     }
   }
-  // With both bound, which one a press leads with. Only a real question when
-  // there are two entities to choose between — and the reason it exists: the
-  // shutter used to be reachable by hold alone, which is not discoverable and
-  // is awkward on a wall tablet.
-  if (o.entity && o.shutterEntity) {
-    // The badge that makes the second entity visible. On by default; the
-    // switch is for a plan where every window has one and they start to shout.
+  if (o.shutterEntity) {
+    // The shutter's badge. With the opening bound too it is what makes the
+    // second entity visible, so it starts on and the switch is for a plan where
+    // every window has one and they start to shout. With the shutter alone it
+    // starts off, and is sold the way the opening's own badge is (issue #293).
     fields.push({
       name: "showShutterIcon",
       label: "Shutter icon",
-      helper: "Shows the shutter's state beside the opening, and opens it when tapped",
+      helper:
+        !o.entity && shutterStyleOf(o) === "roll"
+          ? "A raised roll-up leaves only a line — this puts the shutter's state beside it, and opens it when tapped"
+          : "Shows the shutter's state beside the opening, and opens it when tapped",
       selector: { boolean: {} },
     });
     // Only worth asking once the badge is actually drawn. Left empty the badge
     // follows the entity, whose default glyph changes with the state — an
     // override is one glyph for both, which is why it is not the default.
-    if (o.showShutterIcon ?? true) {
+    if (o.showShutterIcon ?? shutterMarkDefault(o)) {
       fields.push({
         name: "shutterIcon",
         label: "Icon",
@@ -495,13 +594,22 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
         selector: { icon: {} },
       });
     }
+  }
+  // With both bound, which one a press leads with. Only a real question when
+  // there are two entities to choose between — and the reason it exists: the
+  // shutter used to be reachable by hold alone, which is not discoverable and
+  // is awkward on a wall tablet.
+  if (o.entity && o.shutterEntity) {
     fields.push({
       name: "tapTarget",
       label: "Tap opens",
       helper: "The other one moves to press-and-hold. Opens the dialog; use Tap action below to move the shutter itself",
       selector: dropdown(
-        opt("opening", o.type === "door" ? "The door" : "The window"),
-        opt("shutter", "The shutter")
+        opt(
+          "opening",
+          o.type === "door" ? "The door" : skylight ? "The skylight" : "The window"
+        ),
+        opt("shutter", skylight ? "The blind" : "The shutter")
       ),
     });
   }
@@ -545,6 +653,12 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
       type: o.type,
       motion,
       length: o.length,
+      // The *effective* pair, not the raw ones: a skylight placed without a
+      // stated width still has one (SKYLIGHT_WIDTH_RATIO of its length), and
+      // a Width box that opened empty on a rectangle plainly drawn on the
+      // canvas would be a box claiming the drawing has no width.
+      width: skylightWidth(o),
+      ceilingHeight: skylightCeilingHeight(o),
       hinge: o.flipH ? "right" : "left",
       opens: o.flipV ? "other" : "this",
       slide: o.flipH ? "right" : "left",
@@ -559,7 +673,7 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
       shutterStyle: shutterStyleOf(o),
       shutterSide: o.shutterFlipV ? "near" : "far",
       shutterInvert: o.shutterInvert ?? false,
-      showShutterIcon: o.showShutterIcon ?? true,
+      showShutterIcon: o.showShutterIcon ?? shutterMarkDefault(o),
       shutterIcon: o.shutterIcon ?? "",
       showIcon: o.showIcon ?? false,
       icon: o.icon ?? "",
@@ -597,9 +711,22 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
           // On is the default, so only "off" is worth writing down.
           out.sunlight = v ? undefined : false;
         } else if (k === "glazed") {
-          // A window is glass whatever this says, so only a door's answer is
-          // worth keeping — and only when it differs from its type's default.
-          out.glazed = o.type === "door" && v ? true : undefined;
+          // Only an answer that differs from the type's own default is worth
+          // writing down, and the two types that ask default opposite ways: a
+          // door is opaque until it says otherwise, a skylight is glass until
+          // it does. A window never asks — it is glass by definition — so its
+          // answer is always the default and always dropped.
+          out.glazed =
+            o.type === "door" ? (v ? true : undefined) : skylight ? (v ? undefined : false) : undefined;
+        } else if (k === "width") {
+          // Skylights only, and always written: it is half of what the
+          // rectangle is, so leaving it to the default ratio the moment
+          // someone types the length it already has would silently resize it.
+          out.width = skylight && typeof v === "number" && v > 0 ? v : undefined;
+        } else if (k === "ceilingHeight") {
+          // An ordinary storey is the default, so it stays out of the YAML.
+          out.ceilingHeight =
+            skylight && typeof v === "number" && v !== 1 ? v : undefined;
         } else if (k === "entity") {
           out.entity = v;
           // The badge and its glyph only mean something with an entity to
@@ -613,8 +740,9 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
         else if (k === "shutterInvert") out.shutterInvert = v || undefined;
         // The opening is the default, so it stays out of the YAML.
         else if (k === "tapTarget") out.tapTarget = v === "shutter" ? "shutter" : undefined;
-        // Shown is the default: only "off" is worth writing down.
-        else if (k === "showShutterIcon") out.showShutterIcon = v ? undefined : false;
+        // showShutterIcon is settled after the loop, against the entity this
+        // patch leaves behind rather than the one it found.
+        else if (k === "showShutterIcon") continue;
         // The opening's badge defaults the other way round, so only "on" is.
         // Switching it off takes the glyph with it: kept, it would silently
         // reapply the next time someone turned the badge back on.
@@ -667,6 +795,14 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
           if (v !== "swing") out.shutterSecondaryEntity = undefined;
         }
         else if (k === "hinge" || k === "slide") out.flipH = v === "right" || undefined;
+        // Switching type is the one edit that can leave a field describing
+        // something the opening no longer is. Both directions have to be swept
+        // — a door turned into a roof light carries a slider style and a hinge
+        // jamb it can never use again, and a roof light turned into a window
+        // carries a second side and a ceiling height that would come back the
+        // day someone turned it into a skylight again, at whatever size it
+        // used to be. Left behind, both are invisible in the editor (their
+        // fields are not even rendered) and plainly wrong in the YAML.
         else if (k === "opens") out.flipV = v === "other" || undefined;
         else if (k === "style") {
           out.sliderStyle = v === "single" ? undefined : v;
@@ -675,7 +811,76 @@ export function openingForm(o: Opening, featuresOf: (entityId: string) => number
           if (!sliderStyleHasTwoLeaves(v as SliderStyle)) out.secondaryEntity = undefined;
         }
         else if (k === "invert") out.invert = v || undefined;
+        else if (k === "type") {
+          out.type = v;
+          if (v === "skylight") {
+            out.motion = undefined;
+            out.sliderStyle = undefined;
+            out.sashSpan = undefined;
+            out.sash = undefined;
+            out.secondaryEntity = undefined;
+            out.shutterStyle = undefined;
+            out.shutterFlipV = undefined;
+            out.shutterSecondaryEntity = undefined;
+            // Its default glazing is the opposite of a door's, so a door's
+            // `glazed: true` would read as "a glazed skylight", which is
+            // every skylight, and survive as noise.
+            out.glazed = undefined;
+          } else if (skylight) {
+            out.width = undefined;
+            out.ceilingHeight = undefined;
+            out.glazed = undefined;
+            // …and the wall-opening fields a skylight was *ignoring* rather
+            // than lacking. Nothing in the editor can put them on one — the
+            // form does not offer them — but a hand-written plan can, and a
+            // skylight carrying `motion: slide` is harmless right up until the
+            // moment it becomes a window and the slider wakes up. The sweep
+            // has to run both ways or it only half works.
+            //
+            // `flipH` is the deliberate omission, in both directions. It is a
+            // mirror rather than a mechanism: on a wall opening it picks the
+            // hinge jamb or the slide direction, on a roof light it turns a
+            // symmetrical rectangle and so changes nothing anyone can see.
+            // Clearing it would mean a window turned into a skylight and back
+            // came home hinged on the other side, which is a worse surprise
+            // than the one it would prevent — there is nothing to prevent,
+            // because the flag cannot do any harm while it is a skylight.
+            out.motion = undefined;
+            out.sliderStyle = undefined;
+            out.sashSpan = undefined;
+            out.sash = undefined;
+            out.secondaryEntity = undefined;
+            out.shutterStyle = undefined;
+            out.shutterFlipV = undefined;
+            out.shutterSecondaryEntity = undefined;
+          }
+        }
         else out[k] = v;
+      }
+      // Only the answer that differs from the default is worth writing down —
+      // "off" beside a bound opening, "on" for a shutter alone (issue #293) —
+      // and the default follows the opening's entity. So it is judged against
+      // the entity after this patch, and binding or clearing that entity
+      // drops a stored answer that has just become the default: a shutter-only
+      // `true` once a window contact is bound, a `false` once it is cleared.
+      // A cleared shutter has already taken the switch with it, above.
+      //
+      // A badge this patch leaves hidden takes its glyph override too, the way
+      // Show icon takes `icon`: the field disappears with the badge, and a kept
+      // override would silently reapply the next time it was switched on. That
+      // covers the switch turned off and, since the default moves with the
+      // entity, a contact cleared from under a badge that was only on by default.
+      if (!("shutterEntity" in patch && !patch.shutterEntity)) {
+        const after = { entity: "entity" in out ? (out.entity as string | undefined) : o.entity };
+        const byDefault = shutterMarkDefault(after);
+        if ("showShutterIcon" in patch) {
+          const v = !!patch.showShutterIcon;
+          out.showShutterIcon = v === byDefault ? undefined : v;
+          if (!v) out.shutterIcon = undefined;
+        } else if ("entity" in out) {
+          if (o.showShutterIcon === byDefault) out.showShutterIcon = undefined;
+          if (o.shutterIcon && !(o.showShutterIcon ?? byDefault)) out.shutterIcon = undefined;
+        }
       }
       return out;
     },
@@ -1587,6 +1792,28 @@ export function furnitureForm(
         helper: "Clicking this piece changes floor — for a staircase",
         selector: dropdown(opt("", "Nothing"), opt("up", "Up one floor"), opt("down", "Down one floor")),
       },
+      // Actions on the piece itself (issue #284), offered on every piece the
+      // way a room's actions are — furniture with no entity can still navigate or call
+      // a service, and requiring one first would rule that out.
+      //
+      // The tap helper names what it replaces, but only when there is
+      // something to replace: on an ordinary piece a tap does nothing today,
+      // and claiming it "replaces the floor change" would describe a staircase
+      // this piece is not.
+      {
+        name: "tap_action",
+        label: "Tap action",
+        helper: f.goToFloor
+          ? "Replaces the floor change. Put an action on hold or double-tap to keep both"
+          : undefined,
+        selector: { ui_action: { default_action: "none" } },
+      },
+      { name: "hold_action", label: "Hold action", selector: { ui_action: { default_action: "none" } } },
+      {
+        name: "double_tap_action",
+        label: "Double-tap action",
+        selector: { ui_action: { default_action: "none" } },
+      },
     ],
     data: {
       type: f.type,
@@ -1596,6 +1823,9 @@ export function furnitureForm(
       angle: f.angle ?? 0,
       entity: f.entity ?? "",
       goToFloor: f.goToFloor ?? "",
+      tap_action: f.tap_action,
+      hold_action: f.hold_action,
+      double_tap_action: f.double_tap_action,
     },
     // "" is the empty option, and means the piece is ordinary furniture.
     toPatch: (p) => ("goToFloor" in p && !p.goToFloor ? { ...p, goToFloor: undefined } : p),
@@ -1829,6 +2059,18 @@ export function wallForm(w: Wall): FormSpec {
           number: { min: 2, max: MAX_SKIN_WALL_WIDTH, step: 1, mode: "slider", unit_of_measurement: "px" },
         },
       },
+      // Issue #182. A dropdown rather than a switch: a railing is one kind of
+      // line that is not a wall, and open-plan dividers are the next one asked
+      // about (#288).
+      {
+        name: "kind",
+        label: "Kind",
+        helper:
+          (w.kind ?? "wall") === "railing"
+            ? "Drawn thin; lamp light and sunlight carry on over it, and it seals off no dead space"
+            : "A railing is the low edge of a balcony, terrace or gallery",
+        selector: dropdown(opt("wall", "Wall"), opt("railing", "Railing")),
+      },
     ],
     data: {
       x1: Math.round(w.x1),
@@ -1836,10 +2078,15 @@ export function wallForm(w: Wall): FormSpec {
       x2: Math.round(w.x2),
       y2: Math.round(w.y2),
       thickness: w.thickness ?? WALL_THICKNESS,
+      kind: w.kind ?? "wall",
     },
-    // Keep the default out of the YAML so untouched walls stay terse.
-    toPatch: (p) =>
-      "thickness" in p && p.thickness === WALL_THICKNESS ? { ...p, thickness: undefined } : p,
+    // Keep the defaults out of the YAML so untouched walls stay terse.
+    toPatch: (p) => {
+      const out = { ...p };
+      if ("thickness" in p && p.thickness === WALL_THICKNESS) out.thickness = undefined;
+      if ("kind" in p) out.kind = p.kind === "railing" ? "railing" : undefined;
+      return out;
+    },
   };
 }
 
@@ -1958,6 +2205,26 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
   return {
     fields: [
       {
+        name: "view",
+        label: "View",
+        helper: "3D shows standing walls and openings. Editing stays in 2D",
+        selector: dropdown(opt("2d", "2D plan"), opt("3d", "3D isometric")),
+      },
+      ...(normalizeProjection(c.view ?? c.projection) === "iso" ? [
+        {
+          name: "wallHeight",
+          label: "Wall height",
+          helper: "Canvas units. Lower walls reveal more of each room",
+          selector: { number: { min: 0, max: MAX_WALL_HEIGHT, step: 1, mode: "slider" } },
+        },
+        {
+          name: "wallOpacity",
+          label: "Wall opacity",
+          helper: "1 is solid; lower values reveal the floor behind walls",
+          selector: { number: { min: 0, max: 1, step: 0.05, mode: "slider" } },
+        },
+      ] : []),
+      {
         name: "rotation",
         label: "Rotate display",
         helper: "Rotates the live card only — editing stays as drawn",
@@ -2001,6 +2268,14 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
         helper: `Canvas units scale badges and labels with the drawing. Fixed pixels keep their size whatever width the card gets — suits a card rendered larger than its ${c.width}-wide canvas, or a wall tablet`,
         selector: dropdown(opt("plan", "Canvas units"), opt("fixed", "Fixed pixels")),
       },
+      ...(normalizeOverlayScale(c.overlayScale) === "plan"
+        ? [{
+            name: "overlayMinWidth",
+            label: "Stop shrinking below",
+            helper: "Keeps badges and labels sized for at least this plan width. 0 allows normal scaling; larger values can cause overlaps on small cards",
+            selector: { number: { min: 0, max: MAX_OVERLAY_MIN_WIDTH, step: 20, mode: "slider", unit_of_measurement: "px" } },
+          }]
+        : []),
       {
         name: "compactHeader",
         label: "Compact header",
@@ -2011,11 +2286,32 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
         selector: { boolean: {} },
       },
       {
+        name: "zoomedOverlayAuto",
+        label: "Grow badges with the room",
+        helper:
+          "Badges and labels scale with the drawing while zoomed, so a focused room reads bigger without its devices crowding each other any worse than at full plan",
+        selector: { boolean: {} },
+      },
+      ...(c.zoomedOverlayScale === "auto" ? [] : [{
         name: "zoomedOverlayScale",
         label: "Zoomed badge size",
         helper:
           "Badges, labels and text while zoomed in to a room, as a multiple of their size at full plan. 1 keeps them the same",
         selector: { number: { min: 0.5, max: 3, step: 0.1, mode: "slider" } },
+      }]),
+      {
+        name: "roomFocusControls",
+        label: "Room arrows",
+        helper:
+          "Previous/next controls that walk the zoom from room to room. They also let the arrow keys do it, which is otherwise impossible — a room that only zooms is not a tab stop",
+        selector: { boolean: {} },
+      },
+      {
+        name: "roomFocusInterval",
+        label: "Cycle rooms every",
+        helper:
+          "Seconds on each room before moving to the next. 0 only ever moves when asked; any tap or key press starts the count again, so it never moves under someone using the card",
+        selector: { number: { min: 0, max: MAX_FOCUS_INTERVAL, step: 1, mode: "box", unit_of_measurement: "s" } },
       },
       {
         name: "offlineStyle",
@@ -2029,6 +2325,9 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
       },
     ],
     data: {
+      view: normalizeProjection(c.view ?? c.projection) === "iso" ? "3d" : "2d",
+      wallHeight: normalizeWallHeight(c.wallHeight),
+      wallOpacity: normalizeWallOpacity(c.wallOpacity),
       rotation: String(normalizePlanRotation(c.rotation)),
       // "" is "same as above" — the absence of an override, not an angle.
       // `== null` for the same reason resolvePlanRotation uses it: a key
@@ -2041,12 +2340,21 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
       rotationLandscape:
         c.rotationLandscape == null ? "" : String(normalizePlanRotation(c.rotationLandscape)),
       overlayScale: normalizeOverlayScale(c.overlayScale),
+      overlayMinWidth: normalizeOverlayMinWidth(c.overlayMinWidth) ?? 0,
       compactHeader: c.compactHeader ?? false,
-      zoomedOverlayScale: c.zoomedOverlayScale ?? DEFAULT_ZOOMED_OVERLAY_SCALE,
+      zoomedOverlayAuto: c.zoomedOverlayScale === "auto",
+      zoomedOverlayScale:
+        typeof c.zoomedOverlayScale === "number"
+          ? c.zoomedOverlayScale
+          : DEFAULT_ZOOMED_OVERLAY_SCALE,
+      roomFocusControls: normalizeRoomFocus(c.roomFocus)?.controls ?? false,
+      roomFocusInterval: (normalizeRoomFocus(c.roomFocus)?.intervalMs ?? 0) / 1000,
       offlineStyle: offlineStyleOf(c),
     },
     toPatch: (p) => {
       let out = p;
+      // A deliberate 2D selection must also clear the prototype alias.
+      if ("view" in out) out = { ...out, projection: undefined };
       if ("rotation" in out)
         // Stored as a number; 0 means "not rotated", so keep it out of the YAML.
         out = { ...out, rotation: out.rotation === "0" ? undefined : Number(out.rotation) };
@@ -2066,6 +2374,8 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
       // As are the ordinary header and the dimmed offline device — every
       // default here stays out of the YAML, so a config only ever records the
       // choices someone actually made.
+      if ("overlayMinWidth" in out)
+        out = { ...out, overlayMinWidth: normalizeOverlayMinWidth(out.overlayMinWidth) };
       if ("compactHeader" in out && !out.compactHeader)
         out = { ...out, compactHeader: undefined };
       if ("offlineStyle" in out && out.offlineStyle === DEFAULT_OFFLINE_STYLE)
@@ -2074,6 +2384,43 @@ export function projectDisplayForm(c: FloorplanCardConfig): FormSpec {
       // which is what every plan did before this existed (issue #222).
       if ("zoomedOverlayScale" in out && out.zoomedOverlayScale === DEFAULT_ZOOMED_OVERLAY_SCALE)
         out = { ...out, zoomedOverlayScale: undefined };
+      // The toggle owns the same key: on, it is the word; off, it falls back
+      // to the default rather than to whatever multiplier was there before,
+      // so the slider that reappears and the config agree.
+      if ("zoomedOverlayAuto" in out)
+        out = {
+          ...out,
+          zoomedOverlayScale: out.zoomedOverlayAuto ? "auto" : undefined,
+          zoomedOverlayAuto: undefined,
+        };
+      // Two controls over one key (issue #261): the arrows and the dwell are
+      // separate choices, and either can arrive on its own, so the half that
+      // did not change is read back off the config rather than reset. A tour
+      // written in YAML is carried through — the panel has no field for it,
+      // and editing the dwell must not quietly discard it.
+      if ("roomFocusControls" in out || "roomFocusInterval" in out) {
+        const current = normalizeRoomFocus(c.roomFocus);
+        const controls =
+          "roomFocusControls" in out ? !!out.roomFocusControls : (current?.controls ?? false);
+        const asked =
+          "roomFocusInterval" in out
+            ? Number(out.roomFocusInterval)
+            : (current?.intervalMs ?? 0) / 1000;
+        const interval = Number.isFinite(asked) && asked > 0 ? asked : 0;
+        const rooms = current?.rooms;
+        out = {
+          ...out,
+          roomFocus:
+            !controls && !interval
+              ? undefined
+              : controls && !interval && !rooms?.length
+                ? // The plain case says so plainly.
+                  true
+                : { controls, ...(interval ? { interval } : {}), ...(rooms?.length ? { rooms } : {}) },
+          roomFocusControls: undefined,
+          roomFocusInterval: undefined,
+        };
+      }
       return out;
     },
   };
@@ -2154,6 +2501,13 @@ export function projectSunForm(c: FloorplanCardConfig): FormSpec {
 export function projectReliefForm(c: FloorplanCardConfig): FormSpec {
   const fields: FormField[] = [
     {
+      name: "ambientDaylight",
+      label: "Ambient daylight",
+      helper:
+        "Soft sky light through exterior windows and open or glazed doors, even when direct sun does not hit them",
+      selector: { boolean: {} },
+    },
+    {
       name: "sunlight",
       label: "Let the sun in",
       helper:
@@ -2209,6 +2563,7 @@ export function projectReliefForm(c: FloorplanCardConfig): FormSpec {
   return {
     fields,
     data: {
+      ambientDaylight: c.ambientDaylight ?? false,
       sunlight: c.sunlight ?? false,
       sunShade: c.sunShade ?? true,
       north: c.north ?? 0,
@@ -2217,13 +2572,20 @@ export function projectReliefForm(c: FloorplanCardConfig): FormSpec {
       sunBearing: c.sunBearing ?? DEFAULT_SUN_BEARING,
     },
     toPatch: (p) => {
-      const out = { ...p };
-      // Nothing left to aim or to paint, so all of it goes — every one of
-      // these keys is read only while the light is on, and left behind they
+      let out = { ...p };
+      // Ambient daylight is an independent opt-in; false is the default and
+      // therefore stays out of YAML even when direct sunlight is also toggled.
+      if ("ambientDaylight" in out && !out.ambientDaylight)
+        out = { ...out, ambientDaylight: undefined };
+      // Nothing left to aim or to paint, so all of the direct-sun state goes —
+      // every one of these keys is read only while the light is on, and left behind they
       // would sit in the YAML meaning nothing and come back stale on
       // re-enable. The colours are set by their own rows rather than by this
       // form, which is exactly why they have to be named here: nothing else
       // is watching this switch.
+      // ambientDaylight is deliberately absent from the list below: it is a
+      // sibling layer with its own switch, so turning the direct sun off must
+      // not silently turn the sky off with it.
       if ("sunlight" in out && !out.sunlight) {
         return {
           ...out,

@@ -8,9 +8,11 @@ import type {
   FloorItem,
   FloorText,
   Floor,
+  Furniture,
   Area,
   OverlayScale,
   RenderHass,
+  Wall,
 } from "./types";
 import { buildRenderHass } from "./replay-history/render-state-service";
 import "./replay-history/history-timeline";
@@ -35,10 +37,12 @@ import {
   getFloors,
   trackerPresenceDetected,
   newPlanConfig,
+  FURNITURE_COLOR,
 } from "./types";
 import {
   WALL_THICKNESS,
   renderOpening,
+  openingHitSize,
   renderWallMask,
   imageFitRatio,
   sunBrightness,
@@ -68,6 +72,8 @@ import {
   renderRipple,
   renderFurniture,
   furnitureColor,
+  furnitureAccessibleName,
+  furnitureActionForGesture,
   furnitureFloorTarget,
   renderTracker,
   renderArea,
@@ -81,9 +87,11 @@ import {
   renderGlowMask,
   renderSunDimMask,
   wallsLightPassesThrough,
+  wallsThatBlock,
+  isRailing,
   openingClearFraction,
   glowClearSpan,
-  polygonCentroid,
+  areaLabelPoint,
   trackerSensorReading,
   entityIsActive,
   itemBadgeLabel,
@@ -104,7 +112,9 @@ import {
   itemLabelColor,
   areaLabelFontSize,
   wallStrokeStyle,
+  dividerStrokeStyle,
   normalizeOverlayScale,
+  normalizeOverlayMinWidth,
   overlayLength,
   renderSunlight,
   sunLightDirection,
@@ -115,6 +125,7 @@ import {
   SUN_LIGHT_COLOR,
   SUN_SHADE_COLOR,
   hassRenderInputsChanged,
+  collectNamedEntities,
   collectWatchedEntities,
   resolveItemIcon,
   resolveIconAnimation,
@@ -122,14 +133,37 @@ import {
   resolvePlanRotation,
   subscribeOrientation,
   rotatedCanvasSize,
+  floorSwitcherAnchor,
+  rotatePlanAngle,
   rotatePlanPoint,
   planRotationTransform,
   areaZoomTransform,
   resolveAreaZoom,
   zoomedOverlayScale,
   IDENTITY_ZOOM,
+  wallThickness,
   type PlanRotation,
+  type OpeningStyle,
 } from "./render";
+import {
+  normalizeProjection,
+  normalizeWallHeight,
+  normalizeWallOpacity,
+  projectedCanvasSize,
+  projectPlanPoint,
+  projectPlanDirection,
+  planProjectionTransform,
+  elevationShift,
+  wallSolids,
+  furnitureSolid,
+  renderIsoSolids,
+  FURNITURE_HEIGHT_FRACTION,
+  type DisplayFrame,
+} from "./projection";
+import { openingSolids } from "./projection-openings";
+import { AmountTween, OPENING_TWEEN_MS, rafTweenFrames } from "./opening-tween";
+import { focusOrder, normalizeRoomFocus, stepFocus } from "./room-focus";
+import type { SVGTemplateResult } from "lit";
 import { symbolCatalog } from "./symbols";
 import { deadSpacesCached } from "./dead-space";
 import type { Opening } from "./types";
@@ -142,8 +176,16 @@ import {
   SKIN_TEXT,
   SKIN_WALL,
 } from "./skins";
-import { actionForGesture, executeAction, hasAction, itemIsInteractive } from "./actions";
+import {
+  actionForGesture,
+  executeAction,
+  gestureDoesSomething,
+  hasAction,
+  itemIsInteractive,
+} from "./actions";
 import { actionHandler } from "./action-handler";
+import { renderAmbientDaylightLayer } from "./ambient-daylight-integration";
+import { rectAreaSideWalls } from "./editor-geometry";
 import { ReplayControllerImpl } from "./replay-history/replay-controller";
 import { createReplayPanelProps, renderReplayPanel } from "./replay-history/replay-panel";
 
@@ -175,11 +217,26 @@ export class FloorplanCard extends LitElement {
   @state() private _activeFloorId?: string;
   /** View-state: which area (if any) the plan is zoomed in to. Never persisted. */
   @state() private _zoomedAreaId?: string;
+  /** The dwell between rooms while `roomFocus.interval` is cycling. */
+  private _focusTimer?: ReturnType<typeof setTimeout>;
+  /** The interval {@link _focusTimer} was armed with, to notice a config that changes it. */
+  private _focusTimerMs = 0;
   private readonly _wallMaskId = `fp-wall-mask-${FloorplanCard._nextWallMaskId++}`;
+  /**
+   * Eased travel for the standing panels (issue #261). The flat view leaves
+   * this to a CSS transition; a projected panel is rebuilt from its travel
+   * every render, so the number itself is what has to move.
+   */
+  private readonly _openingTween = new AmountTween(rafTweenFrames, () => this.requestUpdate());
   /** Prefix for this card's glow gradient ids, unique per instance (issue #6). */
   private readonly _glowIdBase = `fp-glow-${FloorplanCard._nextGlowId++}`;
   /** Entity ids this plan actually displays; used to skip irrelevant hass updates. */
   private _watchedEntities: Set<string> = new Set();
+  /**
+   * Entities that only appear in an accessible name (issue #284). Kept apart
+   * from `_watchedEntities` on purpose — see `collectNamedEntities`.
+   */
+  private _nameEntities: Set<string> = new Set();
   private readonly _replayController = new ReplayControllerImpl({
     getConfig: () => this._config,
     getHass: () => this.hass,
@@ -248,7 +305,7 @@ export class FloorplanCard extends LitElement {
       if (raw[key] != null && !Array.isArray(raw[key]))
         throw new Error(`Invalid configuration: "${key}" must be a list`);
     }
-    for (const key of ["width", "height", "grid", "rotation", "rotationPortrait", "rotationLandscape"]) {
+    for (const key of ["width", "height", "grid", "rotation", "rotationPortrait", "rotationLandscape", "wallHeight", "wallOpacity"]) {
       if (raw[key] != null && typeof raw[key] !== "number")
         throw new Error(`Invalid configuration: "${key}" must be a number`);
     }
@@ -263,6 +320,7 @@ export class FloorplanCard extends LitElement {
       furniture: config.furniture ?? [],
     };
     this._watchedEntities = collectWatchedEntities(this._config);
+    this._nameEntities = collectNamedEntities(this._config);
     this._syncHistoryServiceContext();
     this._replayController.clearConfigColorCache();
     // HA calls setConfig on every keystroke in the config box. Clearing the
@@ -302,7 +360,16 @@ export class FloorplanCard extends LitElement {
     if (!(changed.size === 1 && changed.has("hass"))) return true;
     const prev = changed.get("hass") as HomeAssistant | undefined;
     if (!prev || !this.hass) return true;
-    return hassRenderInputsChanged(prev, this.hass, this._watchedEntities);
+    if (hassRenderInputsChanged(prev, this.hass, this._watchedEntities)) return true;
+    // Entities that name a button but draw nothing. They have to invalidate a
+    // render — a renamed entity, or one that did not exist at first paint,
+    // otherwise leaves the label stuck at the name it first found — but they
+    // stay out of `_watchedEntities` so `buildRenderHass` never asks a replay
+    // for the history of something the plan does not show.
+    for (const id of this._nameEntities) {
+      if (prev.states[id] !== this.hass.states[id]) return true;
+    }
+    return false;
   }
 
   /**
@@ -324,6 +391,14 @@ export class FloorplanCard extends LitElement {
     if (changed.has("hass") || changed.has("_activeFloorId")) {
       this._syncHistoryServiceContext();
     }
+    // The dwell has to start somewhere, and a config can turn it on or off
+    // under a live card. An interval already counting down is left alone, so
+    // an unrelated state update cannot keep resetting it and stall the tour —
+    // unless the config has changed the interval itself, which would otherwise
+    // wait out the old dwell first.
+    const ms = normalizeRoomFocus(this._config?.roomFocus)?.intervalMs ?? 0;
+    if (!ms) this._stopFocusTimer();
+    else if (!this._focusTimer || ms !== this._focusTimerMs) this._restartFocusTimer();
   }
 
   public getCardSize(): number {
@@ -408,12 +483,82 @@ export class FloorplanCard extends LitElement {
     );
   }
 
+  /** The floor on show: the chosen one, the configured default, or the first. */
+  private _activeFloor(c: FloorplanCardConfig): Floor {
+    const floors = getFloors(c);
+    return (
+      floors.find((f) => f.id === this._activeFloorId) ??
+      floors.find((f) => f.id === c.defaultFloor) ??
+      floors[0]
+    );
+  }
+
+  /**
+   * Walk the zoom to the next room (issue #261). The plan-zoom transition
+   * animates the move, so the view travels rather than cutting — and under the
+   * isometric view it frames the room where it is drawn.
+   */
+  private _stepFocus(step: 1 | -1): void {
+    const c = this._config;
+    if (!c) return;
+    const settings = normalizeRoomFocus(c.roomFocus);
+    const order = focusOrder(this._activeFloor(c).areas, settings);
+    if (!order.length) return;
+    this._zoomedAreaId = stepFocus(order, this._zoomedAreaId, step);
+    this._restartFocusTimer();
+  }
+
+  /**
+   * Start the dwell again from now.
+   *
+   * Called on every step and on any use of the card, which is what keeps a
+   * cycling plan from moving out from under someone mid-tap: the tour only
+   * advances once the card has been left alone for a whole interval.
+   */
+  private _restartFocusTimer(): void {
+    this._stopFocusTimer();
+    const ms = normalizeRoomFocus(this._config?.roomFocus)?.intervalMs ?? 0;
+    if (!ms || !this.isConnected) return;
+    this._focusTimerMs = ms;
+    this._focusTimer = setTimeout(() => {
+      this._focusTimer = undefined;
+      this._stepFocus(1);
+    }, ms);
+  }
+
+  private _stopFocusTimer(): void {
+    if (this._focusTimer) clearTimeout(this._focusTimer);
+    this._focusTimer = undefined;
+  }
+
+  /** Arrow keys walk the rooms; Escape is the way back out to the whole plan. */
+  private readonly _onPlanKey = (ev: KeyboardEvent): void => {
+    if (ev.key === "ArrowRight" || ev.key === "ArrowDown") {
+      ev.preventDefault();
+      this._stepFocus(1);
+    } else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      this._stepFocus(-1);
+    } else if (ev.key === "Escape" && this._zoomedAreaId !== undefined) {
+      ev.preventDefault();
+      this._zoomedAreaId = undefined;
+      this._restartFocusTimer();
+    }
+  };
+
+  /** Any use of the card defers the next automatic move. */
+  private readonly _onCardActivity = (): void => {
+    if (this._focusTimer) this._restartFocusTimer();
+  };
+
   private _label(item: FloorItem, renderHass: RenderHass | undefined): string {
     return item.name ?? renderHass?.states[item.entity]?.attributes?.friendly_name ?? item.entity ?? "";
   }
 
   public disconnectedCallback(): void {
     this._replayController.stopReplayLoop();
+    this._openingTween.stop();
+    this._stopFocusTimer();
     // Orientation subscription for the per-screen rotations (issue #237).
     // Folded in here rather than declared as a second `disconnectedCallback`:
     // a class may only have one, and the later declaration would silently
@@ -478,6 +623,194 @@ export class FloorplanCard extends LitElement {
    * gets a control of its own, instead of living behind a press-and-hold
    * nobody can see.
    */
+  /**
+   * The frame the plan is displayed in: rotated (issue #33), then projected
+   * (issue #261). The SVG's transforms, every overlay anchor and the zoom's
+   * framing all come from this one description, so the layers cannot drift
+   * apart.
+   */
+  private _frame(c: FloorplanCardConfig, rot: PlanRotation): DisplayFrame {
+    const d = rotatedCanvasSize(cssNumber(c.width, DEFAULT_WIDTH), cssNumber(c.height, DEFAULT_HEIGHT), rot);
+    return {
+      w: d.w,
+      h: d.h,
+      projection: normalizeProjection(c.view ?? c.projection),
+      wallHeight: normalizeWallHeight(c.wallHeight),
+      padding: 2 + Math.max(WALL_THICKNESS, ...getFloors(c).flatMap((f) => f.walls.map((w) => wallThickness(w.thickness)))),
+    };
+  }
+
+  /**
+   * A plan point on the displayed canvas, with that canvas's size — what an
+   * overlay anchor's left/top percentages are taken against.
+   */
+  private _display(
+    x: number,
+    y: number,
+    c: FloorplanCardConfig,
+    rot: PlanRotation
+  ): { p: { x: number; y: number }; d: { w: number; h: number } } {
+    const f = this._frame(c, rot);
+    const r = rotatePlanPoint(x, y, c.width, c.height, rot);
+    return { p: projectPlanPoint(r.x, r.y, f), d: projectedCanvasSize(f) };
+  }
+
+  /** A screen-space direction out of the rotated frame, turned by the projection as well. */
+  private _displayDirection(
+    n: { x: number; y: number },
+    c: FloorplanCardConfig,
+    rot: PlanRotation
+  ): { x: number; y: number } {
+    return projectPlanDirection(n.x, n.y, this._frame(c, rot));
+  }
+
+  /** Both views read opening paint and travel through this replay-aware source. */
+  private _openingStyle(o: Opening, renderHass: RenderHass | undefined): OpeningStyle {
+    const amount = this._openingAmount(o, renderHass);
+    const shutterState = o.shutterEntity ? renderHass?.states[o.shutterEntity] : undefined;
+    return {
+      color: SKIN_WALL,
+      // The closed tone (issue #228). Absent, the moving parts stay
+      // the wall colour, which is what a closed opening always was —
+      // and that is also what an opening whose contact has dropped
+      // out falls back to, so a dead sensor does not draw the same
+      // emphatic "shut" as a door that really is (issue #162).
+      // Guarded on `hass` for the same reason the device path is:
+      // before the first states arrive every opening would read as
+      // offline and the closed colour would flash off on load.
+      inactive:
+        !!this.hass &&
+        itemIsOffline(o, o.entity ? renderHass?.states[o.entity]?.state : undefined)
+          ? undefined
+          : o.inactiveColor,
+      open: amount > 0,
+      amount,
+      active: this._openingActive(o, renderHass),
+      accent: o.activeColor ?? SKIN_ACCENT,
+      // Per-leaf state for a two-sensor biparting slider (issue #145).
+      second: this._openingSecond(o, renderHass),
+      // External roller shutter layer (issue #74). No entity bound
+      // yet → previewed shut, like a static plan.
+      shutter: o.shutterEntity
+        ? {
+            amount: shutterAmount(shutterState, o.shutterInvert),
+            active: shutterActive(shutterState, o.shutterInvert),
+            style: shutterStyleOf(o),
+            // The shutter's own accent, falling back to the
+            // opening's and then to the skin's.
+            accent: o.shutterActiveColor ?? o.activeColor ?? SKIN_ACCENT,
+            flip: o.shutterFlipV,
+            // Per-panel state for a two-contact hinged shutter
+            // (issue #159).
+            second: this._shutterSecond(o, renderHass),
+          }
+        : undefined,
+    };
+  }
+
+  /**
+   * The same style with every travelling number eased rather than jumped
+   * (issue #261 review). One key per panel that moves on its own, so the two
+   * leaves of a double door and a shutter over them each keep their own clock.
+   *
+   * `open` is recomputed from the eased travel: a door closing is still a door
+   * that is open, and dropping its panels at the first frame of the movement
+   * is the jump this exists to remove.
+   */
+  private _travelling(o: Opening, style: OpeningStyle): OpeningStyle {
+    const at = (part: string, amount: number) => this._openingTween.value(`${o.id}:${part}`, amount);
+    const amount = at("leaf", style.amount ?? (style.open === false ? 0 : 1));
+    const shutter = style.shutter;
+    return {
+      ...style,
+      amount,
+      open: amount > 0,
+      second: style.second ? { ...style.second, amount: at("leaf2", style.second.amount) } : undefined,
+      shutter: shutter
+        ? {
+            ...shutter,
+            amount: at("shutter", shutter.amount),
+            second: shutter.second
+              ? { ...shutter.second, amount: at("shutter2", shutter.second.amount) }
+              : undefined,
+          }
+        : undefined,
+    };
+  }
+
+  /**
+   * The isometric view's standing geometry (issue #261): walls as extruded
+   * boxes, cut at their doors and lowered to a sill under their windows, and
+   * furniture as blocks with the plan's own glyph on top. Drawn in the
+   * rotated frame, between the floor layers and the sun dimming, and painted
+   * back to front so a wall hides what stands behind it.
+   */
+  private _renderIsoLayer(
+    active: Floor,
+    standingWalls: readonly Wall[],
+    c: FloorplanCardConfig,
+    rot: PlanRotation,
+    frame: DisplayFrame,
+    rotTransform: string,
+    drawFurniture: (f: Furniture) => SVGTemplateResult,
+    furnitureTone: (f: Furniture) => string,
+    renderHass: RenderHass | undefined,
+    animate: boolean
+  ): SVGTemplateResult {
+    // Reduced motion is honoured the same way the CSS transitions are, and
+    // read per render so a preference changed mid-session takes effect.
+    this._openingTween.setDuration(
+      animate && !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? OPENING_TWEEN_MS : 0
+    );
+    const map = (x: number, y: number) => rotatePlanPoint(x, y, c.width, c.height, rot);
+    const walls = standingWalls.map((w) => {
+      const a = map(w.x1, w.y1);
+      const b = map(w.x2, w.y2);
+      return { id: w.id, x1: a.x, y1: a.y, x2: b.x, y2: b.y, thickness: wallThickness(w.thickness) };
+    });
+    const openings = active.openings.map((o) => {
+      const p = map(o.x, o.y);
+      // The rotation turns directions along with points.
+      return { x: p.x, y: p.y, length: o.length, angle: o.angle + rot, type: o.type };
+    });
+    const solids = wallSolids(walls, openings, frame.wallHeight, false);
+    for (const o of active.openings) {
+      solids.push(...openingSolids(o, this._travelling(o, this._openingStyle(o, renderHass)), map, frame.wallHeight));
+    }
+    const height = frame.wallHeight * FURNITURE_HEIGHT_FRACTION;
+    // The glyph is drawn in plan coordinates, so it is lifted by the plan-space
+    // shift that reads as "up" once rotated and projected.
+    const lift = elevationShift(height, rot);
+    for (const f of active.furniture) {
+      solids.push(
+        furnitureSolid(
+          f,
+          map,
+          height,
+          furnitureTone(f),
+          svg`<g transform=${rotTransform || nothing}>
+                <g transform="translate(${lift.x} ${lift.y})">${drawFurniture(f)}</g>
+              </g>`
+        )
+      );
+    }
+    const byId = new Map(active.openings.map((o) => [o.id, o]));
+    return renderIsoSolids(solids, (solid, drawing) => {
+      if (solid.kind !== "panel" && solid.kind !== "opening-hit") return drawing;
+      const o = byId.get(solid.id!);
+      if (!o || !openingIsPressable(o, this._featuresOf)) return drawing;
+      const target = solid.kind === "opening-hit";
+      return svg`<g class="fp-iso-opening-button"
+          role=${target ? "button" : nothing} tabindex=${target ? "0" : nothing}
+          aria-label=${target ? (o.entity ? renderHass?.states[o.entity]?.attributes?.friendly_name ?? o.entity : o.shutterEntity ?? o.type) : nothing}
+          @action=${(ev: CustomEvent<{ action: "tap" | "hold" | "double_tap" }>) => this._onOpeningAction(ev, o)}
+          .actionHandler=${actionHandler({
+            hasHold: hasAction(this._openingPress(o, "hold")?.config),
+            hasDoubleClick: hasAction(this._openingPress(o, "double_tap")?.config),
+          })}>${drawing}</g>`;
+    });
+  }
+
   private _renderShutterMark(
     o: Opening,
     c: FloorplanCardConfig,
@@ -492,13 +825,12 @@ export class FloorplanCard extends LitElement {
     const icon = shutterMarkIcon(o, st, open, this.hass?.entities?.[id]?.icon);
     const accent = cssColor(o.shutterActiveColor ?? o.activeColor) ?? SKIN_ACCENT;
     const at = shutterMarkPoint(o);
-    const p = rotatePlanPoint(at.x, at.y, c.width, c.height, rot);
-    const d = rotatedCanvasSize(c.width, c.height, rot);
+    const { p, d } = this._display(at.x, at.y, c, rot);
     // Pushed clear of the opening by the badge's own size as well as by the
     // canvas offset, so the tap target underneath stays reachable. In the
     // badge's own unit: fixed pixels never shrink with the plan, and would
     // otherwise cover the opening on a large canvas in a narrow card.
-    const n = shutterMarkNormal(o, rot);
+    const n = this._displayDirection(shutterMarkNormal(o, rot), c, rot);
     const step = overlayLength(SHUTTER_MARK_PIXEL_OFFSET, scale);
     const push = `translate(calc(${n.x} * ${step}), calc(${n.y} * ${step}))`;
     const box = overlayLength(SHUTTER_MARK_SIZE, scale);
@@ -554,9 +886,8 @@ export class FloorplanCard extends LitElement {
     const icon = openingMarkIcon(o, st, open, this.hass?.entities?.[id]?.icon);
     const accent = cssColor(o.activeColor) ?? SKIN_ACCENT;
     const at = openingMarkPoint(o);
-    const p = rotatePlanPoint(at.x, at.y, c.width, c.height, rot);
-    const d = rotatedCanvasSize(c.width, c.height, rot);
-    const n = openingMarkNormal(o, rot);
+    const { p, d } = this._display(at.x, at.y, c, rot);
+    const n = this._displayDirection(openingMarkNormal(o, rot), c, rot);
     const step = overlayLength(SHUTTER_MARK_PIXEL_OFFSET, scale);
     const push = `translate(calc(${n.x} * ${step}), calc(${n.y} * ${step}))`;
     const box = overlayLength(SHUTTER_MARK_SIZE, scale);
@@ -622,6 +953,29 @@ export class FloorplanCard extends LitElement {
     const press = areaActionForGesture(a, ev.detail.action);
     if (!press) {
       if (ev.detail.action === "tap") this._onAreaClick(a);
+      return;
+    }
+    if (!this.hass) return;
+    executeAction(this, this.hass, { entity: press.entity }, press.config);
+  }
+
+  /**
+   * A gesture on a piece of furniture (issue #284): its configured action, or —
+   * for a tap with nothing configured — the floor change it already did.
+   *
+   * The same shape as `_onAreaAction`, and for the same reason: every plan
+   * drawn before furniture had actions has three unset gestures, so a
+   * staircase still changes floor on tap and nothing else answers at all.
+   */
+  private _onFurnitureAction(
+    ev: CustomEvent<{ action: "tap" | "hold" | "double_tap" }>,
+    f: Furniture,
+    floors: readonly Floor[],
+    to: string | undefined,
+  ): void {
+    const press = furnitureActionForGesture(f, ev.detail.action);
+    if (!press) {
+      if (ev.detail.action === "tap" && to) this._goToFloor(floors, to);
       return;
     }
     if (!this.hass) return;
@@ -773,7 +1127,15 @@ export class FloorplanCard extends LitElement {
       )
     );
     const rippleSize = item.rippleSize ?? DEFAULT_RIPPLE_SIZE;
-    const rippleDirection = item.rippleDirection ?? DEFAULT_RIPPLE_DIRECTION;
+    // Turned into the displayed frame (issue #280). The direction is a bearing
+    // in the room — which way the sensor looks — and the overlay it lives in is
+    // never rotated as a whole, so without this a rotated card aimed the cone
+    // at a different wall than the plan does. The shutter mark's normal has
+    // taken `rot` for the same reason since it existed.
+    const bearing = rotatePlanAngle(item.rippleDirection ?? DEFAULT_RIPPLE_DIRECTION, rot);
+    const rad = bearing * Math.PI / 180;
+    const direction = this._displayDirection({ x: Math.sin(rad), y: -Math.cos(rad) }, c, rot);
+    const rippleDirection = (Math.atan2(direction.x, -direction.y) * 180 / Math.PI + 360) % 360;
     const rippleWidth = item.rippleWidth ?? DEFAULT_RIPPLE_WIDTH;
 
     // Apply visibility hidden to keep the layout space intact for the label
@@ -793,12 +1155,24 @@ export class FloorplanCard extends LitElement {
       visual = html`<span style="${hiddenStyle}">
         ${this._renderBadge(item, scale, renderHass)}
       </span>`;
+    } else if (labelText && labelPositionOf(item) !== "below") {
+      // A label-only device with its label to one side keeps the badge's
+      // footprint, empty (issue #308): "I would expect the label to keep its
+      // position (and direction of growth), no matter if the badge is shown or
+      // not". The side rules then hang it exactly where they would beside a
+      // badge, which is also where the editor's ghost badge shows it. Below
+      // stays in flow, centred on (x, y), as label-only devices always were.
+      const box = overlayLength(cssNumber(item.size, DEFAULT_ITEM_SIZE), scale);
+      visual = html`<span
+        class="badge-space"
+        aria-hidden="true"
+        style="width:${box};height:${box};"
+      ></span>`;
     }
 
     // Rotated frame: the overlay is HTML, so each anchor is remapped instead
     // of transformed — badges and labels stay upright at any rotation.
-    const p = rotatePlanPoint(item.x, item.y, c.width, c.height, rot);
-    const d = rotatedCanvasSize(c.width, c.height, rot);
+    const { p, d } = this._display(item.x, item.y, c, rot);
     // Only a device that answers is a button (issue #134) — the press effect,
     // the pointer cursor, the `button` role, the tab stop and the gesture
     // listeners all hang off this one fact.
@@ -865,9 +1239,10 @@ export class FloorplanCard extends LitElement {
     scale: OverlayScale
   ): TemplateResult | typeof nothing {
     if (!a.name || (a.showName ?? true) === false) return nothing;
-    const centroid = polygonCentroid(a.points);
-    const p = rotatePlanPoint(centroid.x, centroid.y, c.width, c.height, rot);
-    const d = rotatedCanvasSize(c.width, c.height, rot);
+    // main's label point (#302), mapped through the display frame so 3D puts
+    // it where the projected room is.
+    const centroid = areaLabelPoint(a.points);
+    const { p, d } = this._display(centroid.x, centroid.y, c, rot);
     // Empty unless the size has something to say the stylesheet doesn't — see
     // areaLabelFontSize, which keeps card-mod's `.area-label` hook working.
     const fontSize = areaLabelFontSize(a.labelSize, scale);
@@ -887,8 +1262,7 @@ export class FloorplanCard extends LitElement {
     rot: PlanRotation,
     scale: OverlayScale
   ): TemplateResult {
-    const p = rotatePlanPoint(t.x, t.y, c.width, c.height, rot);
-    const d = rotatedCanvasSize(c.width, c.height, rot);
+    const { p, d } = this._display(t.x, t.y, c, rot);
     return html`
       <div
         class="text fp-text"
@@ -909,19 +1283,130 @@ export class FloorplanCard extends LitElement {
     const replayState = this._replayController.getRenderState();
     const renderHass = buildRenderHass(this.hass, this._watchedEntities, this._replayController.historyService(), replayState.enabled, replayState.currentTime);
     const floors = getFloors(c);
-    const active =
-      floors.find((f) => f.id === this._activeFloorId) ??
-      floors.find((f) => f.id === c.defaultFloor) ??
-      floors[0];
+    const active = this._activeFloor(c);
     // Whole-plan display rotation (issue #33): the SVG rotates via one group
     // transform below; the HTML overlay remaps per point in _renderItem /
     // _renderText. Both must use the same mapping (rotatePlanPoint).
     const rot = resolvePlanRotation(c, this._portrait);
-    const dims = rotatedCanvasSize(cssNumber(c.width, DEFAULT_WIDTH), cssNumber(c.height, DEFAULT_HEIGHT), rot);
+    const frame = this._frame(c, rot);
+    const dims = projectedCanvasSize(frame);
     const rotTransform = planRotationTransform(c.width, c.height, rot);
+    // The isometric view (issue #261): one more transform outside the
+    // rotation, and the walls and furniture stand up in a layer of their own
+    // instead of being drawn flat. The sun dimming has to reach the tops of
+    // the walls too, which lie `wallHeight` outside the plan rectangle.
+    const iso = frame.projection === "iso";
+    // Whether anything actually stands. At zero height the isometric floor
+    // keeps the flat plan's own walls, furniture and opening symbols, and the
+    // standing layer is skipped outright rather than drawn with no height.
+    const standing = iso && frame.wallHeight > 0;
+    // Nothing to travel while nothing stands: the leaf's CSS transition has it.
+    if (!standing) this._openingTween.stop();
+    const projTransform = planProjectionTransform(frame);
+    const dimPad = WALL_THICKNESS + (iso ? frame.wallHeight : 0);
+    // One furniture glyph, flat. Drawn on the floor on the flat plan and on
+    // top of its block under the isometric view — the same drawing either way.
+    const drawFurniture = (f: Furniture): SVGTemplateResult => {
+      const drawn = renderFurniture(
+        f,
+        furnitureColor(f, f.entity ? renderHass?.states[f.entity]?.state : undefined),
+        symbolCatalog(c.symbols)
+      );
+      // Stairs that go somewhere (issue #121). Only when there is a
+      // floor that way: at the top of the building an "up" staircase
+      // is still a staircase, but it takes no clicks rather than
+      // offering a control that does nothing.
+      const to = furnitureFloorTarget(f, floors, active.id);
+      // …and anything else the piece was told to do (issue #284). Hold
+      // and double-tap are asked for separately because the handler
+      // needs to know whether to spend their timers: a staircase with
+      // only a floor change must still answer a tap immediately.
+      //
+      // Whether the gesture could actually *run*, which is a stricter
+      // question than whether one is configured. `hasAction` only says
+      // "present and not `none`", and the guards `executeAction`
+      // applies go further: a `more-info` with no entity to show, a
+      // `navigate` with no path, a `call-service` with no service all
+      // pass it and then do nothing. Asking the weaker question hands
+      // a tab stop and a button role to a piece that answers to
+      // nothing, and spends the hold and double-tap timers on gestures
+      // that cannot fire — so every tap waits out a hold that was
+      // never going to happen.
+      const runs = (g: "tap" | "hold" | "double_tap"): boolean => {
+        const p = furnitureActionForGesture(f, g);
+        return !!p && gestureDoesSomething({ entity: p.entity }, p.config);
+      };
+      const hasHold = runs("hold");
+      const hasDoubleClick = runs("double_tap");
+      const hasTap = runs("tap");
+      // Configured at all, `none` included — a separate question from
+      // whether it does anything. Writing `tap_action: none` on a
+      // staircase is how a plan says "draw the stairs, but do not let
+      // them navigate", so a configured tap suppresses the floor
+      // fallback whether or not it is a no-op. `_onFurnitureAction`
+      // decides the same way, by asking whether a tap was configured
+      // rather than whether it does anything.
+      const tapConfigured = !!furnitureActionForGesture(f, "tap");
+      const goesToFloor = !!to && !tapConfigured;
+      // An inert piece stays inert: no role, no tab stop, no listeners.
+      // A gray diagram that announces itself as a button and then does
+      // nothing is worse than one that says nothing at all.
+      if (!goesToFloor && !hasTap && !hasHold && !hasDoubleClick) return drawn;
+      // The button role and the tab stop are earned by the *tap*, not by
+      // any gesture at all. `actionHandler` turns Enter and Space into
+      // a tap and nothing else, so a piece whose only action sits on
+      // hold or double-tap would take focus, announce itself as a
+      // button, and then do nothing when a keyboard user pressed it —
+      // a promise this card cannot keep.
+      //
+      // Such a piece keeps its listeners, so the hold still works under
+      // a pointer; it just stops advertising a control that cannot be
+      // operated. Hold and double-tap being pointer-only is not new
+      // here — it is true of every item and room on the plan, because
+      // the keyboard has one activation and they are the second and
+      // third gestures on it.
+      const tappable = hasTap || goesToFloor;
+      const name = floors.find((x) => x.id === to)?.name;
+      // Names the gesture that actually runs. A configured tap replaces
+      // the floor change, so promising "Go to Upstairs" would be a lie
+      // on exactly the plans this feature was asked for.
+      const label = goesToFloor ? (name ? `Go to ${name}` : "Go to the next floor") : undefined;
+      // With no floor label there is nothing naming this button, so
+      // say what it is. Only in that case: an `aria-label` would
+      // override the <title> that is already doing the job.
+      //
+      // From the live hass, not `renderHass`, which is the one place
+      // in this template that wants it. `renderHass` is filtered to
+      // the entities the *drawing* watches, and an action's target is
+      // deliberately not one of them — a tap opening a light does not
+      // change how the room looks. Reading the name there would find
+      // nothing and fall back to the raw entity id. It is also what
+      // the gesture itself does: `_onFurnitureAction` hands the live
+      // hass to `executeAction`, so the button is named after the
+      // state it will actually act on, replay or no replay.
+      const spoken = tappable && !label ? furnitureAccessibleName(f, this.hass, symbolCatalog(c.symbols)) : nothing;
+      return svg`<g class="fp-furniture-link"
+            role=${tappable ? "button" : nothing}
+            tabindex=${tappable ? "0" : nothing}
+            aria-label=${spoken}
+            @action=${(ev: CustomEvent<{ action: "tap" | "hold" | "double_tap" }>) =>
+              this._onFurnitureAction(ev, f, floors, to)}
+            .actionHandler=${actionHandler({ hasHold, hasDoubleClick })}>
+          <!-- An SVG tooltip is a <title> child, not a title=
+               attribute: the attribute does nothing here. -->
+          ${label ? svg`<title>${label}</title>` : nothing}
+          ${drawn}
+        </g>`;
+    };
+    // The block's colour: what the glyph is drawn in, through the same allowlist.
+    const furnitureTone = (f: Furniture): string =>
+      furnitureColor(f, f.entity ? renderHass?.states[f.entity]?.state : undefined) ??
+      cssColor(f.color) ??
+      FURNITURE_COLOR;
     // Overlay sizing mode. --fp-plan-w is the canvas width *as displayed*, so a
     // rotated plan divides by the dimension 100cqw actually measures.
     const scale = normalizeOverlayScale(c.overlayScale);
+    const minW = scale === "plan" ? normalizeOverlayMinWidth(c.overlayMinWidth) : undefined;
     // Follow the real sun (issue #113). Elevation comes from the HA instance,
     // so every viewer sees the same picture regardless of their own timezone.
     const sunLevel = c.sunDimming
@@ -934,8 +1419,23 @@ export class FloorplanCard extends LitElement {
     // Dead spaces (issue #88). Derived from the walls and openings, never
     // stored — and memoized on those two arrays, because this runs on every
     // hass update the card takes and the walls have moved on none of them.
+    // Generated room walls (the sideWalls of every rectangle area): each drawn
+    // side adds a wall — or a divider, which blocks nothing and draws as its
+    // dashed self. They join the drawn walls for rendering, but only the
+    // non-divider ones stand in the way of light and seal off space.
+    const generatedRoomWalls = active.areas.flatMap((a) => rectAreaSideWalls(a.id, a.points, a.sideWalls ?? {}));
+    const roomWallSegments = [...active.walls, ...generatedRoomWalls];
+    // In 3D a divider stays a line on the floor: it marks where one room ends,
+    // not a wall, so it is the one segment that does not stand up.
+    const standingWallSegments = standing ? roomWallSegments.filter((w) => !w.divider) : [];
+    const flatWallSegments = standing ? roomWallSegments.filter((w) => w.divider) : [];
+    const blockingWallSegments = wallsThatBlock(
+      generatedRoomWalls.some((w) => w.divider)
+        ? roomWallSegments.filter((w) => !w.divider)
+        : roomWallSegments
+    );
     const deadSpaceRings = c.showDeadSpaces
-      ? deadSpacesCached(active.walls, active.openings)
+      ? deadSpacesCached(blockingWallSegments, active.openings)
       : [];
     // Walls as light meets them (issue #143): open doors and windows are holes,
     // exactly as the plan draws them. Computed once here rather than inside
@@ -947,7 +1447,7 @@ export class FloorplanCard extends LitElement {
     // state change the card takes.
     const castsLight = c.sunDimming || active.items.some((it) => it.glow);
     const lightWalls = castsLight
-      ? wallsLightPassesThrough(active.walls, active.openings, (o) =>
+      ? wallsLightPassesThrough(blockingWallSegments, active.openings, (o) =>
           // Both leaves, and the travel each style actually has (issue #145):
           // asking `entity` alone left a door whose *second* panel was open
           // still blocking light outright. Glass admits it whole regardless
@@ -961,7 +1461,7 @@ export class FloorplanCard extends LitElement {
             o.shutterEntity ? shutterAmount(renderHass?.states[o.shutterEntity], o.shutterInvert) : undefined
           )
         )
-      : active.walls;
+      : blockingWallSegments;
     // Lit rooms hold back the night (issue #113): without this the flat dim
     // multiplies the lit-vs-unlit contrast too, and a lamp ends up *less*
     // visible after dark than at noon.
@@ -980,6 +1480,10 @@ export class FloorplanCard extends LitElement {
     // inside one transformed wrapper below, so the two layers — positioned
     // completely differently (a group transform vs. per-point left/top%) —
     // reframe identically instead of drifting apart under zoom.
+    // Stepping the zoom from room to room (issue #261). Ordered here so the
+    // controls, the arrow keys and the dwell all walk the same rooms.
+    const roomFocus = normalizeRoomFocus(c.roomFocus);
+    const focusRooms = focusOrder(active.areas, roomFocus);
     const zoomedArea = active.areas?.find((a) => a.id === this._zoomedAreaId);
     const zoom = zoomedArea
       ? areaZoomTransform(
@@ -991,7 +1495,8 @@ export class FloorplanCard extends LitElement {
           undefined,
           // A room may say how close to go; without one the fit decides,
           // exactly as it always has (issue #222).
-          resolveAreaZoom(zoomedArea)
+          resolveAreaZoom(zoomedArea),
+          frame
         )
       : IDENTITY_ZOOM;
     // Chrome drawn inside the plan rather than above it (issue #152). The
@@ -1021,6 +1526,8 @@ export class FloorplanCard extends LitElement {
       <ha-card
         .header=${compact ? nothing : (c.title ?? nothing)}
         style=${paletteStyle(c.palette) || nothing}
+        @pointerdown=${this._onCardActivity}
+        @keydown=${this._onCardActivity}
       >
         <div class="card-shell ${this._replayController.isHistoryVisible() ? "replay-visible" : ""}">
           ${this._config.historyReplay?.enabled ? this._renderReplayPanel() : nothing}
@@ -1042,9 +1549,17 @@ export class FloorplanCard extends LitElement {
                and the plan collapses to nothing. -->
           <div
             class="plan ${scale === "plan" ? "scale-plan" : ""}"
+            tabindex=${focusRooms.length > 1 ? "0" : nothing}
+            role=${focusRooms.length > 1 ? "group" : nothing}
+            aria-label=${focusRooms.length > 1
+              ? "Floor plan. Use the arrow keys to move between rooms, Escape to see the whole plan."
+              : nothing}
+            @keydown=${focusRooms.length > 1 ? this._onPlanKey : nothing}
             style="aspect-ratio: ${dims.w} / ${dims.h};
                    width: min(100%, calc(100cqh * ${dims.w} / ${dims.h}));
                    --fp-plan-w: ${dims.w};
+                   --fp-wall-opacity: ${normalizeWallOpacity(c.wallOpacity)};
+                   ${minW === undefined ? "" : `--fp-min-w: ${minW}px;`}
                    background:${cssColorOr(c.background, SKIN_PAPER)};"
           >
           <!-- preserveAspectRatio="none" is correct here, and it took a wrong
@@ -1085,6 +1600,7 @@ export class FloorplanCard extends LitElement {
           ${keyed(
             `${c.skin ?? ""}|${paletteKey(c.palette)}`,
             svg`<svg viewBox="0 0 ${dims.w} ${dims.h}" preserveAspectRatio="none">
+            <g transform=${projTransform || nothing}>
             <g transform=${rotTransform || nothing}>
             ${active.image
               ? svg`<image href=${active.image} x="0" y="0" width=${c.width} height=${c.height}
@@ -1111,6 +1627,20 @@ export class FloorplanCard extends LitElement {
                   ${renderArea(a, areaColor(a, a.entity ? renderHass?.states[a.entity]?.state : undefined))}
                 </g>`;
             })}
+            <!-- Diffuse sky light (PR #204). Reads its opening travel, shutter
+                 state and sun elevation through the same replay-aware state
+                 source as every other light layer, so a replayed plan shows the
+                 daylight of the moment being replayed rather than of now. -->
+            ${renderAmbientDaylightLayer(
+              active,
+              c,
+              renderHass,
+              `${this._wallMaskId}-ambient`,
+              {
+                amount: (o) => this._openingAmount(o, renderHass),
+                secondAmount: (o) => this._openingSecond(o, renderHass)?.amount,
+              }
+            )}
             <!-- Dead spaces (issue #88): the regions the walls seal off that no
                  door or window reaches, hatched. Above the room fills, so a
                  region someone has also drawn an area over still reads as
@@ -1143,34 +1673,7 @@ export class FloorplanCard extends LitElement {
                   : nothing;
               })}
             </g>
-            ${active.furniture.map((f) => {
-              const drawn = renderFurniture(
-                f,
-                furnitureColor(f, f.entity ? renderHass?.states[f.entity]?.state : undefined),
-                symbolCatalog(c.symbols)
-              );
-              // Stairs that go somewhere (issue #121). Only when there is a
-              // floor that way: at the top of the building an "up" staircase
-              // is still a staircase, but it takes no clicks rather than
-              // offering a control that does nothing.
-              const to = furnitureFloorTarget(f, floors, active.id);
-              if (!to) return drawn;
-              const name = floors.find((x) => x.id === to)?.name;
-              return svg`<g class="fp-furniture-link" role="button" tabindex="0"
-                    @action=${() => this._goToFloor(floors, to)}
-                    .actionHandler=${actionHandler({
-                      // A staircase has one gesture. Saying so keeps a tap from
-                      // sitting out the hold and double-tap timers before it
-                      // does anything.
-                      hasHold: false,
-                      hasDoubleClick: false,
-                    })}>
-                  <!-- An SVG tooltip is a <title> child, not a title=
-                       attribute: the attribute does nothing here. -->
-                  <title>${name ? `Go to ${name}` : "Go to the next floor"}</title>
-                  ${drawn}
-                </g>`;
-            })}
+            ${standing ? nothing : active.furniture.map(drawFurniture)}
             <!-- Sunlight through the openings. Under the walls on purpose:
                  light lands on the floor, and the walls stay crisp lines over
                  it rather than being tinted by the patches they let in. The
@@ -1179,7 +1682,11 @@ export class FloorplanCard extends LitElement {
             ${
               c.sunlight
                 ? renderSunlight(
-                    active.walls,
+                    // The same blocking set the lamps and dead space get
+                    // (issue #290): generated room walls stop the sun too, and
+                    // a divider never does. Railings are already out, so the
+                    // sun passes over them (issue #182).
+                    blockingWallSegments,
                     active.openings,
                     c.width,
                     c.height,
@@ -1233,6 +1740,13 @@ export class FloorplanCard extends LitElement {
                         o.shutterEntity
                           ? shutterAmount(renderHass?.states[o.shutterEntity], o.shutterInvert)
                           : undefined,
+                      // How far a skylight's patch slides from the roof light
+                      // before it lands. Handed on raw: it is a fraction of
+                      // the reach above, which already carries the sun's
+                      // height, so scaling it here would apply 1/tan twice
+                      // and pin every patch under its own skylight at noon.
+                      // Bounded at the sink, in skylightDropFraction.
+                      drop: c.skylightDrop,
                       light: c.sunlightColor ?? SUN_LIGHT_COLOR,
                       shade: c.sunShade === false ? null : (c.sunShadeColor ?? SUN_SHADE_COLOR),
                     }
@@ -1240,12 +1754,14 @@ export class FloorplanCard extends LitElement {
                 : nothing
             }
             ${renderWallMask(active.openings, c.width, c.height, this._wallMaskId)}
-            ${active.walls.map(
+            ${(standing ? flatWallSegments : roomWallSegments).map(
                 (w) => svg`
                 <g class="fp-wall-neon"><line x1=${w.x1} y1=${w.y1} x2=${w.x2} y2=${w.y2}
-                      class="wall fp-wall" data-id=${cssIdent(w.id) ?? nothing}
+                      class="wall fp-wall ${isRailing(w) ? "railing" : ""}"
+                      data-id=${cssIdent(w.id) ?? nothing}
                       mask=${`url(#${this._wallMaskId})`}
-                      style=${wallStrokeStyle(w.thickness)} stroke-linecap="round" /></g>`
+                      style=${w.divider ? dividerStrokeStyle() : wallStrokeStyle(w.thickness, w.kind)}
+                      stroke-linecap="round" /></g>`
               )}
             <!-- Room outlines, above the walls they trace. An area polygon runs
                  down the centerline of the room's walls, so an outline drawn
@@ -1269,51 +1785,10 @@ export class FloorplanCard extends LitElement {
               // Unkeyed, Lit morphs floor A's openings into floor B's, and the
               // 0.5s leaf/panel transitions animate the leftover state — a
               // window briefly plays a door swing (issue #50).
-              active.openings,
+              standing ? [] : active.openings,
               (o, i) => o.id || i,
               (o) => {
-              const amount = this._openingAmount(o, renderHass);
-              const shutterState = o.shutterEntity
-                ? renderHass?.states[o.shutterEntity]
-                : undefined;
-              const symbol = renderOpening(o, {
-                color: SKIN_WALL,
-                // The closed tone (issue #228). Absent, the moving parts stay
-                // the wall colour, which is what a closed opening always was —
-                // and that is also what an opening whose contact has dropped
-                // out falls back to, so a dead sensor does not draw the same
-                // emphatic "shut" as a door that really is (issue #162).
-                // Guarded on `hass` for the same reason the device path is:
-                // before the first states arrive every opening would read as
-                // offline and the closed colour would flash off on load.
-                inactive:
-                  !!this.hass &&
-                  itemIsOffline(o, o.entity ? renderHass?.states[o.entity]?.state : undefined)
-                    ? undefined
-                    : o.inactiveColor,
-                open: amount > 0,
-                amount,
-                active: this._openingActive(o, renderHass),
-                accent: o.activeColor ?? SKIN_ACCENT,
-                // Per-leaf state for a two-sensor biparting slider (issue #145).
-                second: this._openingSecond(o, renderHass),
-                // External roller shutter layer (issue #74). No entity bound
-                // yet → previewed shut, like a static plan.
-                shutter: o.shutterEntity
-                  ? {
-                      amount: shutterAmount(shutterState, o.shutterInvert),
-                      active: shutterActive(shutterState, o.shutterInvert),
-                      style: shutterStyleOf(o),
-                      // The shutter's own accent, falling back to the
-                      // opening's and then to the skin's.
-                      accent: o.shutterActiveColor ?? o.activeColor ?? SKIN_ACCENT,
-                      flip: o.shutterFlipV,
-                      // Per-panel state for a two-contact hinged shutter
-                      // (issue #159).
-                      second: this._shutterSecond(o, renderHass),
-                    }
-                  : undefined,
-              });
+              const symbol = renderOpening(o, this._openingStyle(o, renderHass));
               // Only an opening that answers gets a hit target — the same test
               // devices get (issue #134), so an unbound opening is not a button
               // that does nothing. A shutter-only opening does answer, which is
@@ -1321,8 +1796,9 @@ export class FloorplanCard extends LitElement {
               if (!openingIsPressable(o, this._featuresOf)) return symbol;
               // A transparent rect over the opening's wall gap gives a reliable
               // hit target beyond the thin leaf/panel strokes.
-              const half = o.length / 2;
-              const cutH = WALL_THICKNESS + 4;
+              // The gap for a wall opening, the whole rectangle for a
+              // skylight — see openingHitSize.
+              const hit = openingHitSize(o);
               return svg`<g class="fp-opening" role="button" tabindex="0"
                     @action=${(ev: CustomEvent<{ action: "tap" | "hold" | "double_tap" }>) =>
                       this._onOpeningAction(ev, o)}
@@ -1334,8 +1810,9 @@ export class FloorplanCard extends LitElement {
                       hasDoubleClick: hasAction(this._openingPress(o, "double_tap")?.config),
                     })}>
                   ${symbol}
-                  <rect class="fp-opening-hit" x=${o.x - half} y=${o.y - cutH / 2}
-                        width=${o.length} height=${cutH}
+                  <rect class="fp-opening-hit"
+                        x=${o.x - hit.width / 2} y=${o.y - hit.height / 2}
+                        width=${hit.width} height=${hit.height}
                         transform="rotate(${o.angle} ${o.x} ${o.y})" />
                 </g>`;
             })}
@@ -1357,17 +1834,26 @@ export class FloorplanCard extends LitElement {
                  night. pointer-events:none is not optional — this rect spans
                  the canvas, and without it every tappable opening underneath
                  stops responding (the lesson from #108). -->
+            </g>
+            ${standing
+              ? this._renderIsoLayer(active, standingWallSegments, c, rot, frame, rotTransform, drawFurniture, furnitureTone, renderHass,
+                  // Scrubbing history jumps from state to state on purpose;
+                  // easing between them would trail the scrubber.
+                  !replayState.enabled)
+              : nothing}
+            <g transform=${rotTransform || nothing}>
             ${
               c.sunDimming
                 ? svg`${sunDimMask}<rect class="fp-sun-dim"
-                            x=${-WALL_THICKNESS} y=${-WALL_THICKNESS}
-                            width=${c.width + WALL_THICKNESS * 2}
-                            height=${c.height + WALL_THICKNESS * 2}
+                            x=${-dimPad} y=${-dimPad}
+                            width=${c.width + dimPad * 2}
+                            height=${c.height + dimPad * 2}
                             fill="#000"
                             mask=${sunDimMask === nothing ? nothing : `url(#${sunDimMaskId})`}
                             opacity=${1 - sunLevel} />`
                 : nothing
             }
+            </g>
             </g>
           </svg>`
           )}
@@ -1418,8 +1904,33 @@ export class FloorplanCard extends LitElement {
                 <ha-icon icon="mdi:magnify-minus-outline"></ha-icon>
               </button>`
             : nothing}
+          ${roomFocus?.controls && focusRooms.length > 1
+            ? html`<div class="room-focus" role="group" aria-label="Move between rooms">
+                <button
+                  title="Previous room"
+                  aria-label="Previous room"
+                  @click=${() => this._stepFocus(-1)}
+                >
+                  <ha-icon icon="mdi:chevron-left"></ha-icon>
+                </button>
+                <button title="Next room" aria-label="Next room" @click=${() => this._stepFocus(1)}>
+                  <ha-icon icon="mdi:chevron-right"></ha-icon>
+                </button>
+              </div>`
+            : nothing}
           ${compactTitle ? html`<div class="plan-title">${c.title}</div>` : nothing}
-          ${floors.length > 1 ? this._renderFloorSwitcher(floors, active, compact) : nothing}
+          <!-- Outside the zoom wrapper on purpose, placed or not (issue #281).
+               The buttons are how you change floor, and zoom-to-room can scale
+               the plan well past the card: carried along, a switcher placed in
+               the hall would leave the viewport the moment you tapped a room at
+               the other end, and there would be no way to change floor until
+               you zoomed back out. A control you can lose is a worse failure
+               than one that overlaps the drawing for as long as a zoom lasts —
+               and the position is chosen against the view people spend their
+               time in, which is the unzoomed one. -->
+          ${floors.length > 1
+            ? this._renderFloorSwitcher(floors, active, compact, c, rot)
+            : nothing}
         </div>
         </div>
       </ha-card>
@@ -1431,9 +1942,32 @@ export class FloorplanCard extends LitElement {
     return renderReplayPanel(createReplayPanelProps(this._replayController));
   }
 
-  private _renderFloorSwitcher(floors: Floor[], active: Floor, compact = false): TemplateResult {
+  private _renderFloorSwitcher(
+    floors: Floor[],
+    active: Floor,
+    compact = false,
+    c?: FloorplanCardConfig,
+    rot: PlanRotation = 0,
+  ): TemplateResult {
+    // Where the author put it (issue #281), mapped into the displayed frame
+    // like every other anchor so a rotated card keeps it in the same corner of
+    // the house. Absent, the CSS corner it has always used stands — the class
+    // is what switches between the two, so an unpositioned plan emits no
+    // inline style at all and is byte-identical to before.
+    const at = c ? floorSwitcherAnchor(c) : undefined;
+    const placed = at
+      ? rotatePlanPoint(at.x, at.y, cssNumber(c!.width, DEFAULT_WIDTH), cssNumber(c!.height, DEFAULT_HEIGHT), rot)
+      : undefined;
+    const dims = c
+      ? rotatedCanvasSize(cssNumber(c.width, DEFAULT_WIDTH), cssNumber(c.height, DEFAULT_HEIGHT), rot)
+      : { w: 1, h: 1 };
     return html`
-      <div class="floor-switcher ${compact ? "row" : ""}">
+      <div
+        class="floor-switcher ${compact ? "row" : ""} ${placed ? "placed" : ""}"
+        style=${placed
+          ? `left:${(placed.x / dims.w) * 100}%; top:${(placed.y / dims.h) * 100}%;`
+          : nothing}
+      >
         ${floors.map((f) => {
           // Per-floor accent (issue #67): applied only while active so the
           // resting buttons stay theme-neutral. cssColor gates the config
@@ -1575,7 +2109,9 @@ export class FloorplanCard extends LitElement {
     }
     @supports (container-type: inline-size) and (width: 1cqw) {
       .plan.scale-plan .items {
-        --fp-u: calc(100cqw / var(--fp-plan-w));
+        /* Clamp the shared unit so badges and their text keep their proportions.
+           The drawing and overlay positions still follow the actual plan size. */
+        --fp-u: calc(max(100cqw, var(--fp-min-w, 0px)) / var(--fp-plan-w));
       }
     }
     /* The measures that aren't config-driven, so they never reach an inline
@@ -1615,6 +2151,19 @@ export class FloorplanCard extends LitElement {
       pointer-events: auto;
       z-index: 1;
     }
+    /* Placed by the author (issue #281). The corner rules above are overridden
+       rather than made conditional, so a plan that sets no position emits no
+       inline style and renders exactly as it always has. The right:auto is the
+       load-bearing half: without it the block is pinned to both edges and the
+       left the card just set does nothing but stretch it. */
+    .floor-switcher.placed {
+      right: auto;
+      transform: translate(-50%, -50%);
+    }
+    /* Centred on its anchor in both axes, so the point you drop it on is the
+       middle of the block rather than a corner of it — which is what makes a
+       drag feel like it is holding the thing it is holding. A wrapped compact
+       row centres the same way. */
     /* Compact chrome (issue #152): the buttons run across the top strip
        instead of down the side, so they share it with the title chip rather
        than each claiming their own band. Wrapped, because a plan with eight
@@ -1700,6 +2249,26 @@ export class FloorplanCard extends LitElement {
         transition: none;
       }
     }
+    /* The room-focus controls (issue #261), sharing the zoom-out button's look
+       and its corner — it is the same job, one room further along. */
+    .room-focus {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 1;
+      display: flex;
+      gap: 4px;
+    }
+    .room-focus button {
+      cursor: pointer;
+      border: 1px solid var(--divider-color, #ccc);
+      background: var(--card-background-color, #fff);
+      color: var(--primary-text-color);
+      border-radius: 6px;
+      padding: 4px;
+      line-height: 0;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    }
     .zoom-out {
       position: absolute;
       top: 8px;
@@ -1764,6 +2333,12 @@ export class FloorplanCard extends LitElement {
          reason — see MAX_SKIN_WALL_WIDTH. */
       stroke-width: var(--fp-skin-wall-width, 8);
     }
+    /* A railing (issue #182) is the same line at RAILING_WEIGHT of the weight,
+       so it reads as a barrier beside the walls in every skin. An explicit
+       thickness is scaled inline by wallStrokeStyle instead, which wins. */
+    .wall.railing {
+      stroke-width: calc(var(--fp-skin-wall-width, 8) * 0.4);
+    }
     /* Neon, for the skins that want it. Everyone else gets none, which costs
        nothing.
 
@@ -1786,6 +2361,68 @@ export class FloorplanCard extends LitElement {
        same way. See issue #203. */
     .fp-wall-neon {
       filter: var(--fp-skin-wall-filter, none);
+    }
+    /* The isometric view (issue #261). Faces take the skin's wall colour; the
+       shade laid over a side is what makes a box read as a box; a furniture
+       block keeps the paper on top so its glyph still reads. Wall faces pass
+       taps through; opening panels and furniture keep their own actions. */
+    .fp-iso-wall polygon, .fp-iso-sill polygon { stroke: none; }
+    /* Everything standing in the wall plane fades together. A closed door leaf
+       left at full opacity read as a patch of wall that had refused to turn
+       transparent, which is what it looks like from the front (issue #261
+       review). Glazed panels keep their own glass alpha instead. */
+    .fp-iso-wall, .fp-iso-sill, .fp-iso-panel:not(.fp-iso-glazed) {
+      opacity: var(--fp-wall-opacity, 1);
+    }
+    .fp-iso-panel {
+      pointer-events: none;
+      fill: var(--fp-iso-color, var(--fp-skin-wall, var(--primary-text-color, #212121)));
+      stroke: var(--fp-iso-color, var(--fp-skin-wall, var(--primary-text-color, #212121)));
+      stroke-width: 1;
+      stroke-linejoin: round;
+    }
+    .fp-iso-glazed {
+      fill: #8ec5ff;
+      fill-opacity: 0.35;
+    }
+    .fp-iso-opening-hit {
+      pointer-events: none;
+      fill: transparent;
+      stroke: none;
+    }
+    .fp-iso-opening-button { cursor: pointer; }
+    .fp-iso-opening-button > polygon { pointer-events: auto; }
+    .fp-iso-opening-button:focus-visible { outline: 2px solid var(--primary-color, #03a9f4); }
+    .fp-iso-face {
+      fill: var(--fp-skin-wall, var(--primary-text-color, #212121));
+      stroke: var(--fp-skin-wall, var(--primary-text-color, #212121));
+      stroke-width: 0.6;
+      stroke-linejoin: round;
+      pointer-events: none;
+    }
+    .fp-iso-furniture .fp-iso-face {
+      fill: var(--fp-iso-color, var(--fp-skin-furniture, #9e9e9e));
+      stroke: var(--fp-iso-color, var(--fp-skin-furniture, #9e9e9e));
+    }
+    .fp-iso-furniture .fp-iso-top {
+      fill: var(--fp-skin-bg, var(--card-background-color, #fff));
+    }
+    .fp-iso-shade {
+      fill: #000;
+      /* Stroked in its own colour, like the face under it: two pieces of one
+         wall meet edge to edge, and without this each anti-aliased edge shows
+         through the other as a hairline. */
+      stroke: #000;
+      stroke-width: 0.6;
+      stroke-linejoin: round;
+      pointer-events: none;
+    }
+    .fp-iso-glass {
+      fill: #8ec5ff;
+      fill-opacity: 0.35;
+      stroke: var(--fp-skin-wall, var(--primary-text-color, #212121));
+      stroke-width: 0.6;
+      pointer-events: none;
     }
     /* Dead-space hatching (issue #88). It spans whole regions of the plan, so
        without this it swallows every tap inside one — and a sealed region is
@@ -2081,8 +2718,9 @@ export class FloorplanCard extends LitElement {
 
        Vertically centred on the badge rather than baseline-aligned with it:
        the label is one line and the badge is a circle, so centres are what the
-       eye actually pairs up. .inflow (a label-only device) ignores all of
-       this — with no badge there is no side to sit on. */
+       eye actually pairs up. A label-only device sits beside an empty
+       .badge-space instead (issue #308), so turning the badge off does not
+       move the label or change which way it grows. */
     .item > .label.label-left,
     .item > .label.label-right {
       top: 50%;
@@ -2095,9 +2733,16 @@ export class FloorplanCard extends LitElement {
     .item > .label.label-right {
       left: calc(100% + 4px);
     }
-    /* Label-only items (showIcon: false) have no badge to hang under, so the
-       absolute label would drop to y + 2px on a zero-height item. Put it back
-       in flow so it becomes the item's box and centers on (x, y) as before. */
+    /* The badge's footprint with nothing in it: same box, border included, so
+       a side label lands where it would beside a drawn badge. Not a tap
+       target — it inherits the item's pointer-events: none. */
+    .badge-space {
+      border: var(--fp-skin-badge-border-width, 1.5px) solid transparent;
+    }
+    /* Label-only items (showIcon: false) labelled below have no badge to hang
+       under, so the absolute label would drop to y + 2px on a zero-height
+       item. Put it back in flow so it becomes the item's box and centers on
+       (x, y) as before. */
     .label.inflow {
       position: static;
       transform: none;

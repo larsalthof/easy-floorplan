@@ -87,7 +87,12 @@ gap moved the same way. So:
   because that wall's shade has the same gap cut in it — it simply does not start there
   and widen to the doorway's own width (issues #177 / #178);
 - a **shutter that is all the way down** stops the light whatever the glass says — that is
-  what a shutter is for, and a window behind a closed one is as dark as a wall;
+  what a shutter is for, and a window behind a closed one is as dark as a wall. That holds
+  for a roller shutter bound as the window's **own** entity too (a `cover` with
+  `device_class: shutter`, which the editor reads as `motion: roll`): it is a covering
+  standing in for the glass, not the glass itself, so it admits light only as far as it is
+  raised. A blind, shade or curtain defaults to `motion: slide` instead and is still read
+  as the glass behind it;
 - an opening with `sunlight: false` is **wall to the sun**: no patch of its own, and it
   stops a beam crossing it. That is the answer for a solid front door with no sensor bound
   — the plan draws such a door open, the light believes the drawing, and the corridor
@@ -122,4 +127,98 @@ laying a plan out, and one with no sensible answer at night. It stacks with
 [Follow the sun](lighting.md#follow-the-sun), which dims the whole plan after dark and has the last
 word: there is nothing to let in at night.
 
+## Skylights
+
+A wall is a line in plan, so the light through a hole in one is that gap swept
+along the sun — it starts where the wall is, and you see the whole shaft. A
+ceiling is not in the plan at all, so a roof window does something else:
+
+```yaml
+openings:
+  - { id: velux, type: skylight, x: 450, y: 220, length: 100, width: 60, angle: 0,
+      shutterEntity: cover.velux_blind }
+skylightDrop: 0.55   # how far the patch slides before it lands (default)
+```
+
+**The patch is the skylight, moved.** Parallel light projects a horizontal
+rectangle onto a horizontal floor unchanged — congruent, at every sun angle —
+so a roof light lays a patch exactly its own size and shape, and the only
+question it ever asks is *where*. That is why it needs no swept polygon and no
+reach: four corners of arithmetic, and no approximation anywhere in it.
+
+**Where is the ceiling height over the tangent of the sun's angle** — the same
+`h/tan(e)` that says how deep a patch of window light is. `skylightDrop` states
+it as a fraction of `sunReach`, and that is not a shortcut: the reach already
+carries `1/tan(elevation)` (it is why patches shorten as the sun climbs), which
+is exactly the factor the drop needs. So a midday sun drops the light almost
+straight down the shaft, an evening one throws it right across the room, and
+nothing in the skylight has to read the sky to do it. Per skylight,
+`ceilingHeight` multiplies it — `2` for a stairwell, `0.6` for a low attic.
+
+**A patch has an edge**, and this is where a skylight parts company with the
+beams. A shaft of light through a window has no edge — it fades along its own
+length, which is why its outline is always drawn past the point the light has
+died and you never see a straight cut. A patch of sun on a floor is not a
+shaft: being able to see that it is a *rectangle* is the whole of what makes it
+read as a roof light rather than as a lamp someone left on. So it is drawn as
+two shapes — the rectangle itself, lit evenly corner to corner, and the light
+spilling past it, which is what keeps that outline from reading as a cut.
+
+**It slides; it does not swing.** The patch keeps the skylight's own `angle` all
+day, because a translation turns nothing. A roof light set square to the house
+lays a patch square to the house at every hour.
+
+**Only the walls downwind of it can shade it**, and this is the one rule that
+had to be written specially rather than reused. A wall opening's light starts
+*at* a wall, so every wall in the plan is fair game to shade it. A skylight's
+starts at the ceiling — above every wall in the house — so a partition standing
+between the roof light and the sun cannot block anything: at that partition the
+ray was still outside, over the roof. Past the glass the ray is below ceiling
+height and a full-height wall then blocks it completely, which makes the answer
+downwind-or-nothing with no half-way case. (Given the plan's ordinary wall
+shadows instead, a velux with a partition a couple of metres upwind lost its
+patch entirely — the arrangement most real roof lights are in.)
+
+**It is always a source.** The test that keeps a window on the shaded façade
+from throwing sunshine into the garden asks which wall stands between it and
+the sky; a skylight stands behind none of them, so it is never asked.
+
+**And it is glass**, so what stops the light is the blind, not the sash — see
+[The blind is the switch](appearance.md#the-blind-is-the-switch-not-the-sash).
+A blind half down leaves half the patch — and leaves it **against the edge of
+the glass that is still clear**, not in the middle. Nothing about a roof light
+narrows from both sides: the blind comes down from the head edge and the sash
+foreshortens toward that same edge, so what is open is always the strip at the
+far one. A wall opening's shutter gets none of this, because the plan can only
+draw it up or down. `glazed: false` makes it a roof hatch
+instead, admitting light only as far as it is actually open.
+
 Skins can restyle both through `--fp-skin-sunlight` and `--fp-skin-sunshade`.
+
+## Ambient daylight
+
+Set **`ambientDaylight: true`** for soft room-aware daylight from the sky, independently
+of the directional [Sunlight](lighting.md#sunlight) layer:
+
+```yaml
+type: custom:easy-floorplan-card
+ambientDaylight: true
+```
+
+A north-facing window can therefore brighten its room even when no direct sun ray reaches
+that wall. V1 uses your **Area polygons** to identify exterior openings and to hard-clip
+the wash to the receiving room: an opening touching exactly one Area is a sky source; one
+touching two Areas is interior; one touching none is ignored. With no Areas, nothing is
+drawn rather than guessing the room topology.
+
+The layer reuses the opening's existing travel, glazing and shutter state, including the
+rule that a `motion: roll` window is the roller shutter across the glass rather than the
+glass itself. `sunlight: false` on an opening remains the natural-light opt-out. Sky strength follows `sun.sun` elevation
+through civil twilight (-6° to +6°), but never uses azimuth/bearing. Missing or unreadable
+sun elevation fails dark until a valid HA state returns.
+
+The switch is off by default and appears under **Project → Sunlight → Ambient daylight**,
+beside the direct-sun rows it is independent of. V1 keeps
+strength, spread, tint and blur as implementation defaults rather than exposing unstable
+calibration knobs. See [Diffuse ambient daylight](ambient-daylight.md) for the geometry and
+renderer contract.

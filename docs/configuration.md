@@ -18,6 +18,10 @@ Back to the [README](../README.md).
 | `rotation`   | number   | `0`                | Rotate the card `90`, `180` or `270`° — a landscape plan on a portrait wall tablet. Icons and labels stay upright; the editor always shows the plan as drawn. |
 | `rotationPortrait` | number | (same as `rotation`) | Rotation to use while the **screen** is portrait, overriding `rotation`. Unset means `rotation` applies whichever way the screen is. See [Rotation that follows the screen](appearance.md#rotation-that-follows-the-screen). |
 | `rotationLandscape` | number | (same as `rotation`) | Rotation to use while the screen is landscape. The mirror of `rotationPortrait`; set either, or both. |
+| `view` | string | `2d` | `3d` shows standing walls, openings and furniture. Display only; the editor stays flat. See [3D view](appearance.md#3d-view). |
+| `projection` | string | `plan` | Prototype alias: `iso` selects 3D when `view` is unset. |
+| `wallHeight` | number | `60` | Standing wall height in canvas units, clamped to 0–400. Ignored in 2D. |
+| `wallOpacity` | number | `1` | Standing wall opacity, clamped to 0–1. Furniture and opening panels keep their own paint. Ignored in 2D. |
 | `showDeadSpaces` | boolean | `false` | Hatch every space the walls seal off that no door or window reaches, worked out from the walls and openings themselves. See [Dead spaces](behavior.md#dead-spaces). |
 | `sunDimming` | boolean | `false` | Dim through dusk, brighten through dawn, from the HA instance's sun. See [Follow the sun](lighting.md#follow-the-sun). |
 | `sunBrightnessMin` | number | `0.45` | Brightness once the sun is fully down, 0–1. |
@@ -28,19 +32,24 @@ Back to the [README](../README.md).
 | `sunShade`   | boolean  | `true`             | Darken everywhere the light does not reach. Off draws the patches alone, leaving the plan as bright as it was. |
 | `sunlightColor` | string | warm white        | Colour of the light the openings let in. |
 | `sunShadeColor` | string | black             | Colour of that shade — a blue reads as cold north light, a warm grey as dusk. |
+| `ambientDaylight` | boolean | `false`          | Soft room-aware daylight from the sky through exterior openings, independent of sun bearing. Needs Area polygons. See [Ambient daylight](lighting.md#ambient-daylight). |
 | `sunReach`   | number   | `0.34`             | How far light carries from an opening, as a fraction of the plan's shorter side. It fades out over that distance rather than stopping at it, and shortens as the sun climbs. Clamped to `0.02`–`1.5`; anything unreadable falls back to the default. |
+| `skylightDrop` | number | `0.55`             | How far a **skylight's** patch of sun slides from the skylight before it reaches the floor, as a fraction of `sunReach`. Stated against the reach because the reach already carries `1/tan(elevation)`, which is exactly the factor a ceiling height needs — so a midday sun drops the light nearly straight down and an evening one throws it across the room. Per skylight, `ceilingHeight` multiplies it. Clamped to `0`–`4`. |
 | `skin`       | string   | `default`          | Built-in look for the whole plan: `default`, `odnetnin`, `pastel` or `tron`. See [Skins](appearance.md#skins). |
 | `pressEffect`| string   | `scale`            | Feedback when a device is pressed: `scale`, `ripple`, `flash` or `none`. Only devices that actually do something respond. See [Press feedback](../README.md#press-feedback). |
 | `offlineStyle`| string  | `dim`              | How a device whose entity is **offline** is drawn: `dim`, `strike` (dimmed with a diagonal through the badge) or `none`. See [Offline devices](behavior.md#offline-devices). |
 | `compactHeader`| boolean | `false`           | Draw the title inside the plan and the floor buttons in a row, instead of spending a card header row on them. See [Compact header](appearance.md#compact-header). |
 | `overlayScale`| string  | `fixed`; `plan` in new plans | How badges, labels, room names and text are sized: `plan` = canvas units so they scale with the drawing, `fixed` = screen pixels. A card added from the picker is created with `plan`; a config that doesn't say renders `fixed`, which is what every plan drawn before the option existed was laid out in. See [Overlay scale](appearance.md#overlay-scale). |
-| `zoomedOverlayScale` | number | `1` | Overlay size while zoomed in to a room, as a multiple of its size at full plan. `1` — the default — holds badges, labels and text at the size they have unzoomed, which is what zooming has always done. Raise it for a wall tablet read at arm's length, lower it to get a dense room's badges out of the way. Applies to the whole overlay so a badge and its label scale as one thing, and does nothing at full plan. |
+| `overlayMinWidth` | number | — | Minimum displayed plan width (px) used to size the overlay under `plan`; 0 disables it. See [Minimum overlay size](appearance.md#minimum-overlay-size). |
+| `zoomedOverlayScale` | number \| `auto` | `1` | Overlay size while zoomed in to a room, as a multiple of its size at full plan. `auto` grows badges with the room instead — bigger by exactly the room's own zoom factor, so a focused room reads larger while its devices crowd each other no worse than at full plan, which no fixed multiplier can express because the fitted zoom differs room by room. `1` — the default — holds badges, labels and text at the size they have unzoomed, which is what zooming has always done. Raise it for a wall tablet read at arm's length, lower it to get a dense room's badges out of the way. Applies to the whole overlay so a badge and its label scale as one thing, and does nothing at full plan. |
+| `roomFocus`  | boolean \| object | — | Walk the zoom from room to room. `true` adds previous/next controls and lets the arrow keys move between rooms — the only way to zoom a room without a pointer, since a room that merely zooms is not a tab stop. As an object: `controls` (default `true`), `interval` seconds to dwell on each room before moving on (2–600, omitted means it only moves when asked), and `rooms` naming the visiting order. Any tap or key press restarts the dwell. See [Moving between rooms](appearance.md#moving-between-rooms). |
 | `background` | string   | skin / card bg     | Canvas background color (CSS / hex). Overrides the skin's paper. |
 | `palette`    | Palette[]| —                  | Named colours for this plan, referenced from any colour field as `var(--fp-color-<name>)`. See [Named colors](appearance.md#named-colors). |
 | `floors`     | Floor[]  | —                  | Per-floor element groups (see [Floor](#floor)).   |
 | `defaultFloor`| string  | first floor        | Id of the floor shown first.                 |
+| `floorSwitcher` | `{x, y}` | top-right corner | Where the floor buttons sit on the plan, in canvas units — the point the block is centred on. Drag it on the editor canvas. Follows `rotation` like every other anchor. See [Where the floor switcher sits](appearance.md#where-the-floor-switcher-sits). |
 | `walls`      | Wall[]   | `[]`               | Wall segments (single-floor / floor 1).      |
-| `openings`   | Opening[]| `[]`               | Doors and windows (swing or sliding).        |
+| `openings`   | Opening[]| `[]`               | Doors, windows and skylights.                |
 | `items`      | Item[]   | `[]`               | Entity devices.                              |
 | `texts`      | Text[]   | `[]`               | Free text labels.                            |
 | `furniture`  | Furniture[]| `[]`             | Gray furniture/fixture diagrams.             |
@@ -142,32 +151,44 @@ distorted anyway.
 
 ## Wall
 
-`{ id, x1, y1, x2, y2, thickness?, locked? }` — endpoints in virtual units.
+`{ id, x1, y1, x2, y2, thickness?, kind?, locked? }` — endpoints in virtual units.
 
 **`thickness`** is the stroke width in virtual units, set per wall by the **Thickness**
 slider in the editor. It defaults to `8` and is capped at `10`: a doorway is cut through
 the wall layer with a mask sized off the shared default, not per wall, so a wall drawn
 wider than the cap would not be fully cleared by its own door or window.
 
-## Opening (door / window)
+**`kind`** is `wall` (the default, never written) or `railing` — the low edge of a
+balcony, terrace or gallery. A railing is drawn at 40% of the wall weight, lamp light and
+sunlight carry on over it, and it seals off no dead space. Editor: **Kind**. See
+[Balcony railings](appearance.md#balcony-railings).
+
+## Opening (door / window / skylight)
+
+A `skylight` is a hole in the **ceiling** — a velux, a roof light, a lantern —
+rather than in a wall, so it reads a slightly different set of these fields.
+See [Skylights](lighting.md#skylights) for what the sun does with one and
+[Roof windows](appearance.md#roof-windows) for how it is drawn.
 
 | Field         | Type                        | Description                                            |
 | ------------- | --------------------------- | ------------------------------------------------------ |
 | `id`          | string                      | Unique id.                                             |
-| `type`        | `door` \| `window`          | The kind of opening.                                   |
+| `type`        | `door` \| `window` \| `skylight` | The kind of opening. A `skylight` snaps to no wall, cuts no wall band, opens no doorway for a lamp's pool, and is never the way into a [dead space](behavior.md#dead-spaces) — it is not in a wall to begin with. It is always top-hung, so it ignores `motion`, `sash`, `sashSpan`, `sliderStyle` and `flipH`. |
+| `width`       | number                      | **Skylights only**: the other plan dimension, across `length`. A roof window is a rectangle you look down on, so it needs both sides — and the patch of sun it lays is that rectangle, moved. Defaults to 0.62 of `length` (portrait, like an ordinary velux). |
+| `ceilingHeight` | number (clamped `0.1`–`8`) | **Skylights only**: how high the ceiling is here, as a multiple of an ordinary storey (default `1`). Not a distance — the plan has no vertical unit — but the multiplier on how far the patch of light slides before it lands, which is the only thing a ceiling height changes about a plan view. `2` is a stairwell, `0.6` a low attic. Scales `skylightDrop`. The editor's slider offers `0.2`–`4`, which is the useful range; YAML may go further and is clamped. |
 | `motion`      | `swing` \| `slide` \| `roll` \| `fixed` \| `awning` | How it moves: hinged (default), sliding panels, a roll-up curtain (garage / roller shutter), `fixed` — a window that does not open (bay, picture, sealed pane) — or `awning`, hinged at the head and swung out at the sill. A fixed opening draws no leaf and no arc, ignores `entity` for its drawing, and never counts as a gap; glazing still applies, so it passes daylight like the glass it is. See [Top-hinged windows](appearance.md#top-hinged-windows) for `awning`. |
-| `sunlight`    | boolean                     | `false` takes this opening out of [Sunlight](lighting.md#sunlight) entirely — it admits no light and blocks it like wall, however open it is drawn. Editor: **Lets sunlight in**. For the solid door with no sensor, which the plan draws open. |
-| `glazed`      | boolean                     | Lets sunlight through even when shut. Defaults per type — a window is glass, a door is not. Set `true` on a **patio or French door**, which is drawn as a door because that is how it swings but is a wall of glass; set `false` on an opaque window like a glass-brick panel or a hatch, which then admits light only as far as it is open. Only [Sunlight](lighting.md#sunlight) reads it. |
+| `sunlight`    | boolean                     | `false` takes this opening out of the **natural** light entirely — both [Sunlight](lighting.md#sunlight) and [Ambient daylight](lighting.md#ambient-daylight) — it admits no light and blocks it like wall, however open it is drawn. Editor: **Lets sunlight in**. For the solid door with no sensor, which the plan draws open. |
+| `glazed`      | boolean                     | Lets light through even when shut. Defaults per type — a window and a skylight are glass, a door is not. Set `true` on a **patio or French door**, which is drawn as a door because that is how it swings but is a wall of glass; set `false` on an opaque window like a glass-brick panel or a hatch, which then admits light only as far as it is open. Every light layer reads it — [Sunlight](lighting.md#sunlight), [Ambient daylight](ambient-daylight.md) and a lamp's own pool — so glass is glass to all three. A **skylight** is the exception, and only for ambient: that layer finds its sources by which Area boundary an opening sits on, and a roof light sits inside a room rather than on its edge, so it is not a V1 ambient source and its glazing is not read there. Direct sunlight and a lamp's pool are unaffected. A `motion: roll` window is the exception: that is a roller shutter standing in for the glass, so it is judged by how far down it is. **On a skylight this is the field to know about**: glazed (the default), the sash makes no difference to the light and only the blind does, which is the truth about a velux and a surprise to anyone who bound the sash expecting a switch. `false` is the roof **hatch** — a loft door, a smoke vent, a lantern with a solid flap — where the sash itself is what lets the light in. |
 | `sashSpan`    | number (0.05–1)             | Share of the opening the operable leaf covers; the rest is drawn as a fixed pane — thin glass on a window, a solid panel on a door. Default 1 (the leaf fills the frame). Single-**leaf** swing openings, doors included — a double already splits the frame between its leaves. The leaf hangs at the hinge jamb, so `flipH` moves it and its pane together, and a half-width leaf swung wide open clears half the opening rather than all of it. Values below `0.05` are clamped to it: a leaf of no width is a fixed pane, which `motion: fixed` says properly. |
 | `sash`        | `single` \| `double`        | Swing openings only: how many hinged leaves. The default differs by type, because the ordinary cases do — a window opens with `double` (two casement sashes), a door with `single` (one leaf across the opening). Set it to draw a single-sash window or a **double door**; both leaves then hinge at their own jamb and trace their own arc. Ignored by sliding and rolling openings. |
-| `shutterEntity` | string                     | An external shutter over the same gap (`cover` or contact), with its own open/closed state. With `entity` bound too, the card draws the shutter's own icon beside the opening — open/closed in both glyph and colour — and tapping that icon opens the shutter. |
+| `shutterEntity` | string                     | An external shutter over the same gap — a skylight's **blind** (`cover` or contact), with its own open/closed state. A skylight's blind is the one shutter in the plan you see face-on, so its half-way positions count: the slats are drawn across the glass at the fraction the cover reports and the patch of sun narrows to match. A wall opening's shutter is edge-on and can only be up or down. With `entity` bound too, the card draws the shutter's own icon beside the opening — open/closed in both glyph and colour — and tapping that icon opens the shutter. Bound alone, the icon is opt-in through `showShutterIcon`. |
 | `shutterStyle` | `swing` \| `roll`           | Louvered panels or a roll-up curtain. Defaults from the entity (contact → `swing`, `cover` → `roll`). |
 | `shutterInvert` | boolean                   | Flip the shutter's open/closed reading — a reed contact on hinged panels often reads `on` when they are shut. Separate from `invert`. |
 | `shutterSecondaryEntity` | string            | Hinged shutters only: a second contact for the shutter's other panel, so one can be folded back while the other is still across the glass. Its own key rather than `secondaryEntity` — a double casement behind a pair of shutters has four leaves. `shutterInvert` covers both panels; the roll curtain ignores it. |
 | `shutterActiveColor` | string               | Shutter color while open. Falls back to `activeColor`, then the accent. |
 | `shutterFlipV` | boolean                    | Hang hinged panels on the sash's own side of the wall instead of the far side. Ignored by the roll curtain. |
 | `x`, `y`      | number                      | Center position.                                       |
-| `length`      | number                      | Length along the wall.                                 |
+| `length`      | number                      | Length along the wall — and for a **skylight**, which is in no wall, its longer plan side. `width` is the other one. |
 | `angle`       | number                      | Rotation in degrees.                                   |
 | `entity`      | string                      | Contact `binary_sensor`, `cover` or `lock` driving open/closed (a `cover`'s `current_position` gives partial travel). A **lock** reads `unlocked` as open and `locked` as closed — see [Doors on locks](behavior.md#doors-on-locks). |
 | `secondaryEntity` | string                  | Anything with **two leaves**: a second contact / `cover` for the other leaf, so each moves on its own state. That means the two-panel sliders (`biparting`, `biparting-bypass`, `converging`) and any hinged double — a casement window, or a `sash: double` door. `entity` drives the leaf at the −x jamb, so `flipH` swaps which sensor draws which. Unset = both follow `entity`; ignored where there is only one leaf. |
@@ -178,7 +199,7 @@ wider than the cap would not be fully cleared by its own door or window.
 | `flipV`       | boolean                     | Mirror across the wall so a swing opening faces the other room. |
 | `showIcon`    | boolean                     | Draw this opening's **own** icon beside it (default `false`). Editor: **Show icon**. For the roll-up: raised, its curtain is gone and only the coloured track is left, which is easy to miss across a room. Tapping the badge opens the entity's dialog. It sits on the opposite face of the wall from the shutter's badge, so an opening with both never stacks them. |
 | `icon`        | string                      | Override that icon. Absent, it is the entity's own — a **pair**, so the glyph itself says open or closed; an override is one glyph for both, and colour still reports the state. |
-| `showShutterIcon` | boolean                 | Draw that icon (default `true` whenever both are bound). Editor: **Shutter icon**. Turning it off changes nothing about the gestures — for a plan where every window has a shutter and the icons start to shout. |
+| `showShutterIcon` | boolean                 | Draw that icon. Defaults to `true` when `entity` is bound too, and `false` for a shutter bound alone — set `true` there for a roll-up shutter with no window contact, whose raised curtain leaves only its track line. Editor: **Shutter icon**. Turning it off changes nothing about the gestures — for a plan where every window has a shutter and the icons start to shout. |
 | `shutterIcon` | string                      | Override the icon's glyph. Left unset it follows the shutter entity, whose default comes in an open/closed pair; an override is one glyph for both states, and colour still reports the state. |
 | `tapTarget`   | `opening` \| `shutter`      | With both entities bound, which one a tap acts on (default `opening`); the other moves to press-and-hold. Editor: **Tap opens**. Pointing it at the shutter opens the shutter's dialog — it does not drive the motor; set `tap_action: toggle` for that. |
 | `tap_action`  | ActionConfig                | Standard Lovelace action, acting on whichever entity `tapTarget` leads with (or on `shutterEntity` when it is the only one bound). By default an open/close `cover` toggles and everything else opens more-info. An action's own `entity` picks which of the two it acts on. |
@@ -208,7 +229,7 @@ wider than the cap would not be fully cleared by its own door or window.
 | `inactiveColor` | string                               | theme badge  | Badge color while **off** — closed, locked or docked, whichever this entity's domain says. Ignored while `stateColor` rules match, and while the entity is [offline](behavior.md#offline-devices). See [Colors for on and off](behavior.md#colors-for-on-and-off). |
 | `rippleColor` | string                                 | `activeColor`| Ripple ring color, falling back to `activeColor` then the primary color. |
 | `rippleSize`  | number                                 | `80`         | Max ripple diameter (px).                              |
-| `rippleDirection` | number                             | `0`          | Direction the ripple arc is centred on, in degrees clockwise from the top. Only visible when `rippleWidth` is under `360`. Wraps to be between `0`–`360`. |
+| `rippleDirection` | number                             | `0`          | Direction the ripple arc is centred on, in degrees clockwise from the top **of the plan**, not of the screen — a rotated card turns the arc with the drawing, so it keeps pointing at the wall it was aimed at. Only visible when `rippleWidth` is under `360`. Wraps to be between `0`–`360`. |
 | `rippleWidth` | number                                 | `360`        | Angular width of the ripple arc in degrees. `360` rings all the way round; narrow it for a sensor on a wall that cannot see behind itself. Clamped to `0`–`360`. |
 | `glow`        | boolean                                | `false`      | Cast a pool of light onto the plan (lights only). See [Cast light](#cast-light). |
 | `glowRadius`  | number                                 | `140`        | Radius of the cast pool at full brightness, in canvas units. A dimmer lamp casts a proportionally smaller pool, down to half this. |
@@ -222,7 +243,7 @@ wider than the cap would not be fully cleared by its own door or window.
 | `showState`   | boolean                                | sensors only | Show the entity state in the label line. Governs this device's **own** state only — `readings` show regardless. |
 | `showName`    | boolean                                | `false`      | Show the device's name in the label line (`Name · state` when combined). |
 | `readings`    | `{ entity?, attribute?, showState? }[]` | —           | Everything this device reads beyond its own state — a sensor's humidity and pressure, a plug's power, link quality and battery. These print whatever the **device's** `showState` says, since that one is about the device's own entity. To hide one of *these*, set its **own** `showState: false`, which keeps it bound (the badge can still read it) without printing it. See [More readings per device](configuration.md#more-readings-per-device). |
-| `labelPosition` | `below` \| `left` \| `right`         | `below`      | Where the label sits relative to the badge. |
+| `labelPosition` | `below` \| `left` \| `right`         | `below`      | Where the label sits relative to the badge. With `badgeContent: none`, `left` and `right` keep the badge's space empty, so hiding the badge does not move the label; `below` centres the label on the device's point. |
 | `labelSize`   | number                                 | `12`         | Label line font size (px).                             |
 | `tap_action`  | ActionConfig                           | per domain   | Standard Lovelace action. By default `light`, `switch`, `fan` and `input_boolean` toggle and everything else — covers included — opens more-info. |
 | `hold_action` / `double_tap_action` | ActionConfig         | —            | Optional extra gestures.                               |
@@ -313,7 +334,7 @@ there reads `—`, the same as a device's label.
 
 ## Furniture
 
-`{ id, type, x, y, w, h, angle?, hand?, color?, entity?, activeColor?, stateColor?, goToFloor?, locked? }`
+`{ id, type, x, y, w, h, angle?, hand?, color?, entity?, activeColor?, stateColor?, goToFloor?, tap_action?, hold_action?, double_tap_action?, locked? }`
 
 `type` names a **symbol** — one of the ~26 the card ships with (`table`, `sofa`, `bed`,
 `fridge`, `stairs`, …; the full set is [`furniture/`](../furniture), a file each), or one you
@@ -331,6 +352,12 @@ contact sensor is open.
 
 **`goToFloor`** (`up` / `down`) makes clicking the piece change floor — written for the
 `stairs` symbol. See [Stairs that change floor](behavior.md#stairs-that-change-floor).
+
+**`tap_action` / `hold_action` / `double_tap_action`** give a piece the same actions a room
+has (same shape as a device's). `goToFloor` is to furniture what the zoom is to a room: what
+a tap does when nothing else is set, so setting `tap_action` replaces it while hold and
+double-tap stay free. An action with no `entity` of its own uses the piece's. See
+[Actions on furniture](behavior.md#actions-on-furniture).
 
 ```yaml
 { id: plant1, type: plant, x: 300, y: 220, w: 40, h: 40,
@@ -402,6 +429,9 @@ animated inside a rectangular tracked area:
   inline and takes over.
 - `color` / `opacity` — the room's fill; theme primary and `0.25` by default.
 - `haArea` — id of a linked Home Assistant area, set by the editor when `name` matches one.
+- `sideWalls` — rectangle-room edge overrides: keys `top`, `right`, `bottom`, `left` and
+  values `wall`, `divider` or `none`. Double-click a room edge in the editor to cycle it;
+  a `divider` draws a dashed line instead of a full wall.
 - `filterEntities` — with `haArea` set, scopes the entity picker for devices inside this
   polygon to that HA area's entities. Default `true`.
 - `entity` — makes the room live, driving `stateColor` and `activeColor` the same way
@@ -490,6 +520,10 @@ openings:
   - { id: d1, type: door, x: 300, y: 500, length: 80, angle: 0,
       entity: binary_sensor.front_door, activeColor: "#ef5350" }
   - { id: win1, type: window, x: 600, y: 100, length: 140, angle: 0 }
+  # A roof window over the middle of the room: no wall, two sides, and a
+  # blind that is what darkens the room under it.
+  - { id: sky1, type: skylight, x: 500, y: 300, length: 100, width: 60, angle: 0,
+      entity: cover.velux, shutterEntity: cover.velux_blind }
 items:
   - { id: i1, entity: light.living_room, x: 240, y: 200, kind: light, glow: true }
   - { id: i2, entity: binary_sensor.presence, x: 380, y: 380, kind: binary_sensor,
@@ -640,7 +674,7 @@ label gets no Label group, and an opening with no shutter gets no Shutter group.
 | Element | Groups |
 | --- | --- |
 | Device | Identity · What it reads · Label · Badge · Color · Effects · Behaviour · Visibility |
-| Door / window | Shape · What it reads · Sunlight · Shutter · Badge · Color · Behavior |
+| Door / window / skylight | Shape · What it reads · Sunlight · Shutter · Badge · Color · Behavior |
 | Furniture | Shape · What it reads · Behavior · Color |
 | Area | Identity · What it reads · Color · Behavior · Home Assistant area |
 | Tracker | Zone · Sensors · Marker |

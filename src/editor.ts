@@ -19,6 +19,7 @@ import type {
   Area,
   AreaPoint,
   HaAreaInfo,
+  RectAreaSide,
   StateColorRule,
   OverlayScale,
   PaletteColor,
@@ -59,6 +60,7 @@ import {
   trackerPresenceDetected,
   uid,
   DEFAULT_GLOW_RADIUS,
+  RECT_AREA_SIDES,
 } from "./types";
 import {
   WALL_THICKNESS,
@@ -69,11 +71,17 @@ import {
   renderGlow,
   resolveOpeningAmount,
   openingIsActive,
+  openingIsSkylight,
+  openingHitSize,
+  skylightWidth,
   wallsLightPassesThrough,
+  wallsThatBlock,
+  isRailing,
   glowClearSpan,
   openingHasTwoLeaves,
   secondLeafOf,
   renderGlowMask,
+  floorSwitcherAnchor,
   openingDefaultOpen,
   openingMotion,
   shutterStyleOf,
@@ -90,7 +98,7 @@ import {
   SHUTTER_MARK_SIZE,
   SHUTTER_MARK_ICON_SIZE,
   hasShutterMark,
-  openingFromDeviceClass,
+  openingDeviceClassPatch,
   renderRipple,
   renderFurniture,
   renderTracker,
@@ -125,7 +133,9 @@ import {
   collectWatchedEntities,
   hassRenderInputsChanged,
   wallStrokeStyle,
+  dividerStrokeStyle,
   normalizeOverlayScale,
+  normalizeOverlayMinWidth,
   overlayLength,
 } from "./render";
 import { deadSpacesCached } from "./dead-space";
@@ -155,6 +165,18 @@ import {
   layoutPointsInPolygon,
   nearestAreaSnapPoint,
   nearestCorner,
+  rectAreaSideWallNext,
+  rectAreaClamp,
+  rectAreaEdgeResize,
+  rectAreaHasMinimumSize,
+  rectAreaPoints,
+  rectAreaVertexResize,
+  RECT_AREA_EPSILON,
+  rectAreaWallId,
+  rectAreaSharedEdgeCouple,
+  rectAreaSharedSides,
+  rectAreaSideWalls,
+  isRectArea,
   snapWallEnd,
   type AttachedCorner,
   type OrigPos,
@@ -204,7 +226,7 @@ import {
 const formLabel = (s: FormField): string => s.label;
 const formHelper = (s: FormField): string | undefined => s.helper;
 
-type Tool = "select" | "wall" | "door" | "window" | "tracker" | "area";
+type Tool = "select" | "wall" | "door" | "window" | "skylight" | "tracker" | "area";
 type OverlaySel = { kind: "item" | "text"; id: string };
 
 /** Toolbar metadata per tool: mdi icon + label (icons make the modes scannable). */
@@ -213,9 +235,36 @@ const TOOL_META: Record<Tool, { icon: string; label: string }> = {
   wall: { icon: "mdi:wall", label: "Wall" },
   door: { icon: "mdi:door", label: "Door" },
   window: { icon: "mdi:window-closed-variant", label: "Window" },
+  // A roof seen from outside, which is the one thing in the icon set that says
+  // "this is overhead" without saying "window" a second time — the two tools
+  // sit next to each other and have to be told apart at a glance.
+  skylight: { icon: "mdi:home-roof", label: "Skylight" },
   tracker: { icon: "mdi:crosshairs-gps", label: "Tracker" },
-  area: { icon: "mdi:vector-polygon", label: "Area" },
+  area: { icon: "mdi:vector-polygon", label: "Area" }
 };
+
+/**
+ * Where the editor draws the switcher handle before it has been placed.
+ *
+ * An unplaced switcher sits 8px from the plan's top-right — a screen
+ * measurement, which the editor cannot turn into canvas units without knowing
+ * the rendered size. This is the same corner said in canvas units instead:
+ * close enough to reach for, and the moment it is dragged the stored position
+ * is exact. It is only ever a starting grip, never written to the config.
+ */
+const switcherHandleHome = (w: number, h: number) => ({ x: w * 0.93, y: h * 0.08 });
+
+/**
+ * How far the pointer must travel, in canvas units, before a press counts as a
+ * drag rather than a click — the jitter a real click or tap produces.
+ *
+ * Shared by `_applyDrag` and the floor-switcher handle so the two cannot drift:
+ * they were the same number written twice, with one of them comparing `<` and
+ * the other `<=`, so a move of exactly 4 units was a click for an element and a
+ * drag for the switcher.
+ */
+const DRAG_SLOP = 4;
+const AREA_DRAG_HOLD_MS = 200;
 
 /** Icon shown in the Element header per selected element kind. */
 const SEL_KIND_ICON: Record<SelKind, string> = {
@@ -239,6 +288,8 @@ interface Drag {
   endpoint?: 1 | 2;
   /** Set when dragging a single Area vertex handle (index into its `points`). */
   areaVertex?: number;
+  /** Set when dragging a single Area edge handle (index into its edges). */
+  areaEdge?: number;
   /**
    * Endpoints of *other* walls that coincide with the dragged wall's
    * corner(s) and stretch along with it (issue #30). Hold Alt to detach and
@@ -251,6 +302,13 @@ interface Drag {
   snapshot?: FloorplanCardConfig;
   /** The redo stack as it stood before the drag's history push cleared it. */
   priorFuture?: FloorplanCardConfig[];
+  /**
+   * The undo stack as it stood before that same push. Restored wholesale on
+   * cancel, because the push is `slice(-HISTORY_MAX)`: on a full stack it
+   * evicts the oldest entry as well as adding a new one, and dropping the new
+   * one by identity leaves the evicted one gone for good.
+   */
+  priorHistory?: FloorplanCardConfig[];
   /**
    * Set if anything emitted while this drag was live. A drag normally emits
    * nothing until it is released, which is what lets cancel restore the
@@ -352,12 +410,29 @@ export class FloorplanCardEditor extends LitElement {
    * Closed by clicking back on `points[0]` once at least 3 points are placed.
    */
   @state() private _draftArea: { points: AreaPoint[] } | null = null;
-  /** Live cursor position while drawing an Area, for the rubber-band preview segment. */
+  /** Live cursor position while continuing a polygon draft. */
   @state() private _areaHover: AreaPoint | null = null;
+  /** Anchor point for the current Area-tool gesture. */
+  @state() private _areaDragStart: { x: number; y: number } | null = null;
+  private _areaDragCurrent: AreaPoint | null = null;
+  private _areaDragTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True once the Area gesture has been held after movement for 200 ms. */
+  @state() private _areaDragMoved = false;
   /** When true, walls are drawn freely (no horizontal/vertical or corner gravity). */
   @state() private _freeWalls = false;
   /** Default length applied to a freshly placed door/window. User-editable from the context bar. */
   @state() private _defaultOpeningLength = 60;
+  /**
+   * The same, for skylights, and separately — a roof light is not the size of
+   * a door. Two numbers because it has two sides, and both are set before
+   * placing for the same reason the opening length is: a rectangle you have to
+   * place and then resize twice is a rectangle you place in the wrong spot.
+   *
+   * The default is roughly a velux in a plan drawn at the usual scale, in the
+   * portrait proportions {@link SKYLIGHT_WIDTH_RATIO} describes.
+   */
+  @state() private _defaultSkylightLength = 70;
+  @state() private _defaultSkylightWidth = 44;
   @state() private _marquee: Marquee | null = null;
   @state() private _history: FloorplanCardConfig[] = [];
   @state() private _future: FloorplanCardConfig[] = [];
@@ -376,6 +451,26 @@ export class FloorplanCardEditor extends LitElement {
   @state() private _symbolDraft = "";
   @state() private _symbolError = "";
   @state() private _paletteError = "";
+  /** The switcher's own drag (issue #281); see `_renderSwitcherHandle`. */
+  @state() private _switcherDrag?: {
+    pointerId: number;
+    /** The handle that took capture — the listeners' `currentTarget` is the root. */
+    handle: Element;
+    moved: boolean;
+    /** Where the pointer went down, so a click can be told from a drag. */
+    at: { x: number; y: number };
+    /** The config before the drag, so a cancel can put it back locally. */
+    before: FloorplanCardConfig;
+    /** The redo stack the first-movement history push cleared. */
+    priorFuture: FloorplanCardConfig[];
+    /**
+     * The whole undo stack as it stood before the first-movement push, so a
+     * cancel can restore it wholesale. Dropping the pushed entry by identity
+     * is not enough: that push is `slice(-HISTORY_MAX)`, so on a full stack it
+     * also evicts the oldest entry, which no amount of filtering brings back.
+     */
+    priorHistory?: FloorplanCardConfig[];
+  };
   /** Project section expanded? Collapsed by default — page settings are touched rarely. */
   @state() private _projectOpen = false;
   /**
@@ -425,6 +520,22 @@ export class FloorplanCardEditor extends LitElement {
    */
   private _dragMoves = new FrameCoalescer<DragMove>(rafScheduler, (move) => {
     if (this._drag) this._applyDrag(move);
+  });
+  /**
+   * The switcher drag's moves, coalesced to one a frame (issue #281).
+   *
+   * Same reason as `_dragMoves` above: a pointer reports faster than the
+   * browser paints, and `_config` is reactive — applying every raw move
+   * re-renders the whole editor per event and leaves the handle further behind
+   * the cursor the longer the drag runs.
+   */
+  private _switcherMoves = new FrameCoalescer<{ x: number; y: number }>(rafScheduler, (at) => {
+    if (!this._switcherDrag) return;
+    // Only the anchor moves. Unlike every other drag this one cannot change
+    // which entities the card watches — `floorSwitcher` is a point and binds
+    // nothing — so there is no `collectWatchedEntities` here: rescanning the
+    // whole config per frame to arrive at the same set is work for nothing.
+    this._config = { ...this._config, floorSwitcher: { x: at.x, y: at.y } };
   });
   /** A drag changed the config and the host has not been told yet. */
   private _dragDirty = false;
@@ -480,13 +591,37 @@ export class FloorplanCardEditor extends LitElement {
     // overlays had their chance to absorb the key (see _onHostKeyDown).
     this.addEventListener("keydown", this._onHostKeyDown);
     window.addEventListener("focusin", this._onFocusIn);
+    // The floor-switcher drag owns its pointer here rather than on the handle
+    // (issue #281). Capture is best-effort — `_capturePointer` swallows the
+    // failure — and without it every event lands on whatever the cursor is
+    // over: the SVG, an item badge, a text label, each with handlers of its
+    // own that know nothing about this drag and clear `_gesturePointer` on
+    // release, stranding the handle. Patching the targets one at a time
+    // misses the next one. The shadow root is an ancestor of all of them, and
+    // in the capture phase it sees each event before any target does, so the
+    // drag is finished the same way whichever element the pointer is over.
+    const root = this.renderRoot as EventTarget;
+    root.addEventListener("pointermove", this._onSwitcherMove as EventListener, true);
+    root.addEventListener("pointerup", this._onSwitcherUp as EventListener, true);
+    root.addEventListener("pointercancel", this._onSwitcherCancel as EventListener, true);
   }
 
   public disconnectedCallback(): void {
     window.removeEventListener("keydown", this._onKeyDown, true);
     this.removeEventListener("keydown", this._onHostKeyDown);
     window.removeEventListener("focusin", this._onFocusIn);
+    const root = this.renderRoot as EventTarget;
+    root.removeEventListener("pointermove", this._onSwitcherMove as EventListener, true);
+    root.removeEventListener("pointerup", this._onSwitcherUp as EventListener, true);
+    root.removeEventListener("pointercancel", this._onSwitcherCancel as EventListener, true);
     if (this._applyResetTimer !== null) clearTimeout(this._applyResetTimer);
+    // The area-drag timer is outside the main drag loop and can outlive the
+    // element if the editor is torn down mid-hold. Clear it here so a
+    // detached editor cannot keep mutating stale draft state after reconnect.
+    this._clearAreaDragTimer();
+    this._areaDragStart = null;
+    this._areaDragCurrent = null;
+    this._areaDragMoved = false;
     // HA's dialog reparents the editor, so this can land mid-drag. Removal
     // takes the pointer capture with it, so the gesture is over either way:
     // hand the host what the drag accumulated (_config is otherwise its only
@@ -500,6 +635,20 @@ export class FloorplanCardEditor extends LitElement {
     this._dragMoves.cancel();
     this._flushDrag();
     this._drag = null;
+    // Same reasoning for the switcher (issue #281): removal takes the capture
+    // with it, so the gesture is over either way. `_config` is the host's only
+    // copy of where it was dropped, so hand that over rather than rolling back
+    // — a reparent mid-drag should not silently undo the move.
+    // Settled, not dropped — the opposite of the element drag above, for a
+    // reason specific to this one. `moved` is set the instant the pointer
+    // passes the slop, before any frame has run, so a drag torn down between
+    // those two moments would otherwise emit the *pre-drag* config as if it
+    // were the result: a config-changed that says nothing changed. The queued
+    // value is a plain point with no DOM dependency, so settling it is safe
+    // and means `moved` always corresponds to a real position.
+    this._switcherMoves.settle();
+    if (this._switcherDrag?.moved) this._emit(this._config);
+    this._switcherDrag = undefined;
     this._gesturePointer = null;
     this._resetPinch();
     super.disconnectedCallback();
@@ -1054,7 +1203,11 @@ export class FloorplanCardEditor extends LitElement {
       this._draft ||
       this._draftTracker ||
       this._draftArea ||
-      this._marquee
+      this._marquee ||
+      // The switcher's drag is a gesture like any other (issue #281): an undo
+      // or a nudge landing mid-drag would interleave with its history snapshot
+      // and its eventual emit.
+      this._switcherDrag
     );
     // Backspace pops the last placed vertex instead of deleting a selected
     // element while an Area draft is in progress (checked ahead of the
@@ -1113,7 +1266,14 @@ export class FloorplanCardEditor extends LitElement {
         this._addQuery = "";
         return;
       }
-      if (this._draft || this._draftTracker || this._draftArea || this._marquee || this._drag) {
+      if (
+        this._draft ||
+        this._draftTracker ||
+        this._draftArea ||
+        this._marquee ||
+        this._drag ||
+        this._switcherDrag
+      ) {
         ev.preventDefault();
         ev.stopPropagation();
         this._cancelGesture();
@@ -1239,7 +1399,7 @@ export class FloorplanCardEditor extends LitElement {
       this._capturePointer(ev);
       return;
     }
-    if (this._tool === "door" || this._tool === "window") {
+    if (this._tool === "door" || this._tool === "window" || this._tool === "skylight") {
       this._addOpening(this._tool, this._snap(raw.x), this._snap(raw.y));
       return;
     }
@@ -1252,22 +1412,17 @@ export class FloorplanCardEditor extends LitElement {
       return;
     }
     if (this._tool === "area") {
-      // Discrete clicks, like door/window — no drag capture/gesture pointer.
       const pt = this._snapAreaPoint(raw.x, raw.y);
-      if (!this._draftArea) {
-        this._draftArea = { points: [pt] };
+      if (this._draftArea) {
+        this._addAreaPoint(pt);
+        this._areaHover = null;
         return;
       }
-      const pts = this._draftArea.points;
-      const first = pts[0]!;
-      if (pts.length >= 3 && Math.hypot(pt.x - first.x, pt.y - first.y) <= ENDPOINT_SNAP) {
-        this._finishArea();
-        return;
-      }
-      const last = pts[pts.length - 1]!;
-      if (pt.x !== last.x || pt.y !== last.y) {
-        this._draftArea = { points: [...pts, pt] };
-      }
+      this._areaDragStart = { x: pt.x, y: pt.y };
+      this._areaDragCurrent = null;
+      this._areaDragMoved = false;
+      this._gesturePointer = ev.pointerId;
+      this._capturePointer(ev);
       return;
     }
     // Select tool, empty canvas: start a marquee (rubber-band) selection.
@@ -1286,6 +1441,10 @@ export class FloorplanCardEditor extends LitElement {
    * between — is dropped, so a canceled drag leaves no trace in undo.
    */
   private _cancelGesture(): void {
+    // The switcher's drag (issue #281) rolls back through here like every
+    // other gesture, which is what puts it on the Escape cascade and the
+    // no-buttons path without either of them naming it.
+    this._rollBackSwitcherDrag();
     // Whatever the drag accumulated is about to be replaced by its snapshot.
     this._dragMoves.cancel();
     this._dragDirty = false;
@@ -1293,12 +1452,15 @@ export class FloorplanCardEditor extends LitElement {
     this._draft = null;
     this._draftTracker = null;
     this._draftArea = null;
-    this._areaHover = null;
+    this._areaDragStart = null;
+    this._areaDragCurrent = null;
+    this._clearAreaDragTimer();
+    this._areaDragMoved = false;
     this._marquee = null;
     const drag = this._drag;
     this._drag = null;
     if (drag?.moved && drag.snapshot) {
-      this._history = this._history.filter((c) => c !== drag.snapshot);
+      this._history = drag.priorHistory ?? this._history.filter((c) => c !== drag.snapshot);
       if (drag.emitted) {
         this._emit(drag.snapshot);
       } else {
@@ -1330,7 +1492,10 @@ export class FloorplanCardEditor extends LitElement {
     // A gesture with no buttons held means pointerup never reached us
     // (alt-tab, dialog retarget) — treat it as canceled instead of letting
     // the element chase the hovering mouse.
-    if (ev.buttons === 0 && (this._drag || this._draft || this._draftTracker || this._marquee)) {
+    if (
+      ev.buttons === 0 &&
+      (this._drag || this._draft || this._draftTracker || this._marquee || this._areaDragStart)
+    ) {
       this._cancelGesture();
       return;
     }
@@ -1347,6 +1512,38 @@ export class FloorplanCardEditor extends LitElement {
         x1: this._snap(raw.x),
         y1: this._snap(raw.y),
       };
+      return;
+    }
+    if (this._tool === "area" && this._areaDragStart) {
+      const raw = this._toVirtual(ev, false);
+      const start = this._areaDragStart;
+      const current = { x: raw.x, y: raw.y };
+      this._areaDragCurrent = current;
+      if (this._areaDragMoved) {
+        this._updateAreaRectangleDraft(current);
+        return;
+      }
+      // Below the slop this is a click, not a rectangle drag — the same rule
+      // `_applyDrag` and the marquee use, so a press that jitters a few
+      // virtual units and then holds can't turn into an (empty) draft.
+      if (
+        !this._areaDragMoved &&
+        this._areaDragTimer === null &&
+        Math.hypot(current.x - start.x, current.y - start.y) > DRAG_SLOP
+      ) {
+        this._areaDragTimer = setTimeout(() => {
+          this._areaDragTimer = null;
+          const target = this._areaDragCurrent;
+          if (!this._areaDragStart || !target) return;
+          // The draft only becomes one once the snapped corner actually
+          // leaves the start cell — a pointer that wandered and came back is
+          // still a click (see `_updateAreaRectangleDraft`).
+          const snapped = { x: this._snap(target.x), y: this._snap(target.y) };
+          if (snapped.x === start.x && snapped.y === start.y) return;
+          this._areaDragMoved = true;
+          this._updateAreaRectangleDraft(target);
+        }, AREA_DRAG_HOLD_MS);
+      }
       return;
     }
     if (this._tool === "area" && this._draftArea) {
@@ -1391,6 +1588,37 @@ export class FloorplanCardEditor extends LitElement {
       if (w >= this.grid / 2 && h >= this.grid / 2) {
         this._addTracker(x, y, w, h);
       }
+      return;
+    }
+    if (this._tool === "area" && this._areaDragStart) {
+      const start = this._areaDragStart;
+      const wasDrag = this._areaDragMoved;
+      const draft = this._draftArea;
+      this._clearAreaDragTimer();
+      this._areaDragStart = null;
+      this._areaDragCurrent = null;
+      this._areaDragMoved = false;
+      this._releasePointer(ev);
+
+      if (wasDrag && draft) {
+        const width = Math.abs(draft.points[1]!.x - draft.points[0]!.x);
+        const height = Math.abs(draft.points[3]!.y - draft.points[0]!.y);
+        if (width > 0 && height > 0) {
+          const points = rectAreaClamp(draft.points, this._floor().areas ?? [], { dx: 0, dy: 0 });
+          if (!rectAreaHasMinimumSize(points) || (this._floor().areas ?? []).some((other) => this._rectAreasOverlap({ id: "draft-area", points, showName: true }, other))) {
+            this._draftArea = null;
+            return;
+          }
+          const rect: Area = { id: uid("area"), points, showName: true };
+          this._commitFloor({ areas: [...(this._floor().areas ?? []), rect] });
+          this._selection = [{ kind: "area", id: rect.id }];
+          this._tool = "select";
+        }
+        this._draftArea = null;
+        return;
+      }
+
+      this._addAreaPoint(start);
       return;
     }
     if (this._marquee) {
@@ -1450,14 +1678,20 @@ export class FloorplanCardEditor extends LitElement {
     return cyclePick(candidates, this._selection, sameSpot) ?? sel;
   }
 
-  private _startDrag(ev: PointerEvent, sel: Sel, endpoint?: 1 | 2, areaVertex?: number): void {
+  private _startDrag(
+    ev: PointerEvent,
+    sel: Sel,
+    endpoint?: 1 | 2,
+    areaVertex?: number,
+    areaEdge?: number
+  ): void {
     if (this._tool !== "select") return;
     ev.stopPropagation();
     if (this._gesturePointer !== null) return;
     this._canvasWrap?.focus({ preventScroll: true });
-    // Endpoint/vertex handles always operate on that single element; every
+    // Endpoint/vertex/edge handles always operate on that single element; every
     // other click goes through the overlap-aware picker (issue #52).
-    const explicitHandle = endpoint != null || areaVertex != null;
+    const explicitHandle = endpoint != null || areaVertex != null || areaEdge != null;
     const pick = explicitHandle ? sel : this._resolvePick(ev, sel);
     if (explicitHandle) this._selectOne(pick);
     else this._selectForPointer(ev, pick);
@@ -1476,6 +1710,7 @@ export class FloorplanCardEditor extends LitElement {
       orig: this._snapshotSelection(),
       endpoint,
       areaVertex,
+      areaEdge,
     };
     if (pick.kind === "wall") this._drag.attached = this._attachedCorners(pick.id, endpoint);
     this._gesturePointer = ev.pointerId;
@@ -1525,6 +1760,106 @@ export class FloorplanCardEditor extends LitElement {
     return m;
   }
 
+  /**
+   * Keep full-side-adjacent rectangle rooms synchronized while one side moves.
+   *
+   * Returns the updated `areas` array plus the ids of rooms that actually
+   * coupled to the primary room during this move.
+   */
+  private _coupleRectAreaSharedEdges(
+    primaryId: string,
+    points: AreaPoint[],
+    delta: { dx: number; dy: number },
+    areas: readonly Area[],
+    movingSide?: RectAreaSide
+  ): { areas: Area[]; coupledIds: Set<string> } {
+    let primaryPoints = points;
+    const sharedReference = points;
+    const updated = new Map<string, AreaPoint[]>();
+    const coupledIds = new Set<string>();
+
+    for (const other of areas) {
+      if (other.id === primaryId) continue;
+      const otherPoints = updated.get(other.id) ?? other.points;
+      // Every neighbor is compared with the same pre-drag boundary. This is
+      // important when one long edge abuts two shorter edges: after the first
+      // neighbor moves, the primary boundary is no longer at its old position.
+      if (other.locked) continue;
+      const coupled = rectAreaSharedEdgeCouple(sharedReference, otherPoints, delta, movingSide);
+      if (!coupled) continue;
+      primaryPoints = coupled.points;
+      updated.set(other.id, coupled.other);
+      coupledIds.add(other.id);
+    }
+
+    const result = {
+      areas: areas.map((a) => {
+        if (a.id === primaryId) return { ...a, points: primaryPoints };
+        const next = updated.get(a.id);
+        return next ? { ...a, points: next } : a;
+      }),
+      coupledIds,
+    };
+
+    return result;
+  }
+
+  private _rectAreasOverlap(a: Area, b: Area): boolean {
+    const aXs = a.points.map((p) => p.x);
+    const aYs = a.points.map((p) => p.y);
+    const bXs = b.points.map((p) => p.x);
+    const bYs = b.points.map((p) => p.y);
+    return (
+      Math.max(...aXs) > Math.min(...bXs) &&
+      Math.min(...aXs) < Math.max(...bXs) &&
+      Math.max(...aYs) > Math.min(...bYs) &&
+      Math.min(...aYs) < Math.max(...bYs)
+    );
+  }
+
+  /**
+   * Limit a shared-edge resize against rooms that are not part of the current
+   * shared component. A coupled neighbor can encounter a new room after the
+   * drag starts, so clamping only the primary room is insufficient.
+   */
+  private _coupledEdgeResize(
+    primaryId: string,
+    moving: Area,
+    delta: { dx: number; dy: number },
+    areas: readonly Area[],
+    movingSide: RectAreaSide
+  ): { areas: Area[]; coupledIds: Set<string>; delta: { dx: number; dy: number } } {
+    const requested = this._coupleRectAreaSharedEdges(primaryId, moving.points, delta, areas, movingSide);
+    if (!requested.coupledIds.size) return { ...requested, delta };
+
+    const componentIds = new Set([primaryId, ...requested.coupledIds]);
+    const obstacles = areas.filter((a) => !componentIds.has(a.id));
+    const collides = (candidate: { areas: Area[] }): boolean =>
+      candidate.areas.some(
+        (a) =>
+          componentIds.has(a.id) &&
+          (!rectAreaHasMinimumSize(a.points) || obstacles.some((other) => this._rectAreasOverlap(a, other)))
+      );
+
+    if (!collides(requested)) return { ...requested, delta };
+
+    let low = 0;
+    let high = 1;
+    for (let i = 0; i < 18; i++) {
+      const scale = (low + high) / 2;
+      const candidateDelta = { dx: delta.dx * scale, dy: delta.dy * scale };
+      const candidate = this._coupleRectAreaSharedEdges(primaryId, moving.points, candidateDelta, areas, movingSide);
+      if (collides(candidate)) high = scale;
+      else low = scale;
+    }
+
+    const safeDelta = { dx: delta.dx * low, dy: delta.dy * low };
+    return {
+      ...this._coupleRectAreaSharedEdges(primaryId, moving.points, safeDelta, areas, movingSide),
+      delta: safeDelta,
+    };
+  }
+
   private _applyDrag(p: DragMove): void {
     const drag = this._drag!;
     // First *effective* movement: snapshot for undo now, not at pointerdown,
@@ -1532,9 +1867,10 @@ export class FloorplanCardEditor extends LitElement {
     // taps produce — doesn't spam history or wipe the redo stack. Threshold
     // matches the marquee's click-vs-drag test.
     if (!drag.moved) {
-      if (Math.hypot(p.x - drag.start.x, p.y - drag.start.y) <= 4) return;
+      if (Math.hypot(p.x - drag.start.x, p.y - drag.start.y) <= DRAG_SLOP) return;
       drag.moved = true;
       drag.priorFuture = this._future;
+      drag.priorHistory = this._history;
       this._pushHistory();
       drag.snapshot = this._history[this._history.length - 1];
     }
@@ -1578,17 +1914,100 @@ export class FloorplanCardEditor extends LitElement {
     if (drag.primary.kind === "area" && drag.areaVertex != null) {
       const idx = drag.areaVertex;
       const target = this._snapAreaPoint(p.x, p.y, { areaId: drag.primary.id, vertexIndex: idx });
-      const areas = (f.areas ?? []).map((a) =>
-        a.id === drag.primary.id
-          ? { ...a, points: a.points.map((pt, i) => (i === idx ? target : pt)) }
-          : a
+      const moving = (f.areas ?? []).find((a) => a.id === drag.primary.id)!;
+      let points = isRectArea(moving.points)
+        ? rectAreaVertexResize(moving.points, idx, target)
+        : moving.points.map((pt, i) => (i === idx ? target : pt));
+      const delta = { dx: target.x - moving.points[idx]!.x, dy: target.y - moving.points[idx]!.y };
+      const vertexSides: RectAreaSide[] = isRectArea(moving.points)
+        ? [RECT_AREA_SIDES[(idx + 3) % 4], RECT_AREA_SIDES[idx]]
+        : [];
+      let coupled = { areas: f.areas ?? [], coupledIds: new Set<string>() };
+      for (const side of vertexSides) {
+        const next = this._coupleRectAreaSharedEdges(drag.primary.id, moving.points, delta, coupled.areas, side);
+        coupled = {
+          areas: next.areas,
+          coupledIds: new Set([...coupled.coupledIds, ...next.coupledIds]),
+        };
+      }
+      // Below minimum size the resize is rejected: emit the floor as it was
+      // before this frame, so the neighbours the coupling loop moved are not
+      // left displaced against a primary that snapped back — shared edges stay
+      // coincident on the frame that refuses the move.
+      if (isRectArea(moving.points) && !rectAreaHasMinimumSize(points)) {
+        this._emitFloor({ areas: f.areas ?? [] });
+        return;
+      }
+      this._emitFloor({
+        areas: coupled.areas.map((a) => (a.id === drag.primary.id ? { ...a, points } : a)),
+      });
+      return;
+    }
+
+    // Single Area edge handle: move one wall of a rectangle while the opposite
+    // wall stays fixed, so the room can be pushed or pulled without moving the
+    // whole shape.
+    if (drag.primary.kind === "area" && drag.areaEdge != null) {
+      const idx = drag.areaEdge;
+      const target = { x: this._snap(p.x), y: this._snap(p.y) };
+      const moving = (f.areas ?? []).find((a) => a.id === drag.primary.id)!;
+      let points = rectAreaEdgeResize(moving.points, idx, target);
+      const edgeStart = moving.points[idx % 4]!;
+      const edgeEnd = moving.points[(idx + 1) % 4]!;
+      const horizontal = Math.abs(edgeStart.y - edgeEnd.y) < RECT_AREA_EPSILON;
+      const movedEdgeStart = points[idx % 4]!;
+      const delta = horizontal
+        ? { dx: 0, dy: movedEdgeStart.y - edgeStart.y }
+        : { dx: movedEdgeStart.x - edgeStart.x, dy: 0 };
+
+      // The coupling helper applies delta to the live room. Passing points
+      // here would apply the same edge movement twice and make the shared
+      // boundary drift between pointer frames. The coupled resize also checks
+      // every room moved by the shared component against new obstacles.
+      const coupled = this._coupledEdgeResize(
+        drag.primary.id,
+        moving,
+        delta,
+        f.areas ?? [],
+        RECT_AREA_SIDES[idx]!
       );
-      this._emitFloor({ areas });
+      const uncoupled = (coupled.areas ?? []).filter(
+        (a) => a.id !== drag.primary.id && !coupled.coupledIds.has(a.id)
+      );
+      const sharedPoints = coupled.coupledIds.size
+        ? coupled.areas.find((a) => a.id === drag.primary.id)?.points ?? points
+        : points;
+      points = rectAreaClamp(
+        sharedPoints,
+        uncoupled,
+        coupled.delta
+      );
+      // Rejected: roll the whole resize back, not just the primary.
+      // `coupled.areas` carries the neighbours this frame moved to follow the
+      // shared edge; emitting it with only the primary restored tears that
+      // boundary, which the previous frame had kept coincident.
+      if (!rectAreaHasMinimumSize(points)) {
+        this._emitFloor({ areas: f.areas ?? [] });
+        return;
+      }
+      this._emitFloor({
+        areas: coupled.areas.map((a) => (a.id === drag.primary.id ? { ...a, points } : a)),
+      });
       return;
     }
 
     // Single opening: keep the wall-snapping (and angle alignment) behavior.
-    if (this._selection.length === 1 && drag.primary.kind === "opening") {
+    // Skylights are exempt — they belong to the ceiling, so there is no wall
+    // for one to snap to, and snapping one anyway was actively hostile: drag a
+    // roof light past a partition and it jumped onto it and span to its angle,
+    // which is not a thing a hole in a ceiling does.
+    if (
+      this._selection.length === 1 &&
+      drag.primary.kind === "opening" &&
+      !openingIsSkylight(
+        f.openings.find((o) => o.id === drag.primary.id) ?? { type: "door" as const }
+      )
+    ) {
       const orig = drag.orig.get(`opening:${drag.primary.id}`);
       if (orig && orig.kind === "pt") {
         const rawX = orig.x + (p.x - drag.start.x);
@@ -1686,7 +2105,11 @@ export class FloorplanCardEditor extends LitElement {
 
   private _addOpening(type: OpeningType, x: number, y: number): void {
     const f = this._floor();
-    const snap = snapToWall(x, y, f.walls, WALL_SNAP);
+    // A skylight is a hole in the ceiling, so there is no wall to drop it onto
+    // and none to take an angle from: it lands where you clicked, square to
+    // the plan, and stays there. Every other opening still snaps.
+    const skylight = type === "skylight";
+    const snap = skylight ? undefined : snapToWall(x, y, f.walls, WALL_SNAP);
     const o: Opening = {
       id: uid(type),
       type,
@@ -1694,8 +2117,12 @@ export class FloorplanCardEditor extends LitElement {
       y: snap?.y ?? y,
       // User-editable from the door/window context bar so opening size can be
       // set BEFORE placing (the previous hardcoded 60 forced place-then-resize).
-      length: this._defaultOpeningLength,
+      length: skylight ? this._defaultSkylightLength : this._defaultOpeningLength,
       angle: snap?.angle ?? 0,
+      // Its second side, which only a skylight has. Written out rather than
+      // left to the default so the very first drag of the Width field has
+      // something to move, and so the plan says what it drew.
+      ...(skylight ? { width: this._defaultSkylightWidth } : {}),
     };
     this._commitFloor({ openings: [...f.openings, o] });
     this._selection = [{ kind: "opening", id: o.id }];
@@ -1764,6 +2191,49 @@ export class FloorplanCardEditor extends LitElement {
     this._draftArea = null;
     this._areaHover = null;
     this._tool = "select";
+  }
+
+  private _clearAreaDragTimer(): void {
+    if (this._areaDragTimer === null) return;
+    clearTimeout(this._areaDragTimer);
+    this._areaDragTimer = null;
+  }
+
+  private _roomWallSegments(floor: Floor): Wall[] {
+    return (floor.areas ?? []).flatMap((area) =>
+      rectAreaSideWalls(area.id, area.points, area.sideWalls ?? {}).filter((wall) => !wall.divider)
+    );
+  }
+
+  private _updateAreaRectangleDraft(target: AreaPoint): void {
+    const start = this._areaDragStart;
+    if (!start) return;
+    const snapped = { x: this._snap(target.x), y: this._snap(target.y) };
+    this._draftArea = {
+      points: rectAreaClamp(
+        rectAreaPoints({ x0: start.x, y0: start.y, x1: snapped.x, y1: snapped.y }),
+        this._floor().areas ?? [],
+        { dx: snapped.x - start.x, dy: snapped.y - start.y }
+      ),
+    };
+  }
+
+  /** Add one polygon vertex, or close the draft when clicking its start. */
+  private _addAreaPoint(pt: AreaPoint): void {
+    if (!this._draftArea) {
+      this._draftArea = { points: [pt] };
+      return;
+    }
+    const pts = this._draftArea.points;
+    const first = pts[0]!;
+    if (pts.length >= 3 && Math.hypot(pt.x - first.x, pt.y - first.y) <= ENDPOINT_SNAP) {
+      this._finishArea();
+      return;
+    }
+    const last = pts[pts.length - 1]!;
+    if (pt.x !== last.x || pt.y !== last.y) {
+      this._draftArea = { points: [...pts, pt] };
+    }
   }
 
   private _addText(): void {
@@ -2307,7 +2777,23 @@ export class FloorplanCardEditor extends LitElement {
    */
   private static readonly OPENING_GROUPS = [
     // What it is, and how it is drawn.
-    ["Shape", ["type", "motion", "length", "sash", "sashSpan", "hinge", "opens", "slide", "style", "angle"]],
+    // `width` and `ceilingHeight` are the skylight's two; `openingForm` only
+    // offers them for one, so they cost every other opening nothing but a
+    // name in this list.
+    ["Shape", [
+      "type",
+      "motion",
+      "length",
+      "width",
+      "ceilingHeight",
+      "sash",
+      "sashSpan",
+      "hinge",
+      "opens",
+      "slide",
+      "style",
+      "angle",
+    ]],
     // Which contacts drive it — the opening's own, before the shutter's.
     ["What it reads", ["entity", "secondaryEntity", "invert"]],
     // How it behaves toward the sun (issue #177), which is neither shape nor
@@ -2337,7 +2823,7 @@ export class FloorplanCardEditor extends LitElement {
     ["Shape", ["type", "hand", "w", "h", "angle"]],
     ["What it reads", ["entity"]],
     // What clicking it does — a staircase that changes floor (issue #121).
-    ["Behavior", ["goToFloor"]],
+    ["Behavior", ["goToFloor", "tap_action", "hold_action", "double_tap_action"]],
   ] as const;
 
   private static readonly TRACKER_GROUPS = [
@@ -2877,6 +3363,11 @@ export class FloorplanCardEditor extends LitElement {
       case "opening": {
         const o = f.openings.find((x) => x.id === sel.id);
         if (!o) return "Opening";
+        // A skylight reports both its sides, because it has both and because
+        // that is the pair you are adjusting — one number for a rectangle
+        // reads as half an answer.
+        if (openingIsSkylight(o))
+          return `Skylight · ${Math.round(o.length)}×${Math.round(skylightWidth(o))}`;
         return `${o.type === "door" ? "Door" : "Window"} · ${Math.round(o.length)} units`;
       }
       case "item": {
@@ -2977,6 +3468,54 @@ export class FloorplanCardEditor extends LitElement {
               ? `${n} point${n === 1 ? "" : "s"} placed — click to add more (3+ to close).`
               : `${n} points placed — click the first point to close the room, or keep adding.`}
         </span>
+      `;
+    } else if (t === "skylight") {
+      label = "Skylight";
+      // Two sizes, for the one opening that has two. Same reasoning as the
+      // single Length below — a roof light you have to place and then resize
+      // twice is one you place in the wrong spot — and the hint is different
+      // because the gesture is: there is no wall to aim at.
+      const size = (
+        name: string,
+        value: number,
+        title: string,
+        set: (v: number) => void
+      ) => html`
+        <label class="ctx-field">
+          ${name}
+          <input
+            class="num"
+            type="number"
+            min="1"
+            .value=${String(value)}
+            title=${title}
+            @change=${(e: Event) => {
+              set(Math.max(1, Number((e.target as HTMLInputElement).value) || value));
+            }}
+          />
+        </label>
+      `;
+      body = html`
+        ${size(
+          "Length",
+          this._defaultSkylightLength,
+          "Default long side applied to the next skylight you place",
+          (v) => {
+            this._defaultSkylightLength = v;
+          }
+        )}
+        ${size(
+          "Width",
+          this._defaultSkylightWidth,
+          "Default short side applied to the next skylight you place",
+          (v) => {
+            this._defaultSkylightWidth = v;
+          }
+        )}
+        <span class="ctx-hint"
+          >Click anywhere inside a room to drop a roof window — it sits in the
+          ceiling, so it snaps to no wall.</span
+        >
       `;
     } else if (t === "door" || t === "window") {
       label = t === "door" ? "Door" : "Window";
@@ -3093,11 +3632,22 @@ export class FloorplanCardEditor extends LitElement {
     const c = this._config;
     const floor = this._floor();
     const floors = c.floors ?? [];
+    const generatedWallSegments = this._roomWallSegments(floor);
+    const blockingWallSegments = wallsThatBlock([...floor.walls, ...generatedWallSegments]);
+    const sideWallLookup = new Map<string, { area: Area; side: RectAreaSide; edgeIndex: number }>();
+    for (const area of floor.areas ?? []) {
+      for (const [edgeIndex, side] of RECT_AREA_SIDES.entries()) {
+        sideWallLookup.set(rectAreaWallId(area.id, side), { area, side, edgeIndex });
+      }
+    }
     // How the card will size this plan's badges and labels. The canvas honours
     // it so the editor previews the drawing rather than a version of it with
     // fixed-size furniture on top (issue #192): set a badge to 34 on a plan
     // 1200 wide and the number you see here is the one the card renders.
     const overlay = normalizeOverlayScale(c.overlayScale);
+    // And the width it stops shrinking below, which the card applies to the
+    // same unit — so a narrow editor canvas previews what a narrow card draws.
+    const overlayMinW = overlay === "plan" ? normalizeOverlayMinWidth(c.overlayMinWidth) : undefined;
     // Which room, if any, is currently narrowing the selected element's
     // entity picker — animated on the canvas so the scoping is never a
     // mystery (see _scopingAreaId).
@@ -3105,14 +3655,14 @@ export class FloorplanCardEditor extends LitElement {
     // Dead spaces (issue #88) — derived from the walls and openings, so they
     // follow every edit without anything being stored.
     const deadSpaceRings = c.showDeadSpaces
-      ? deadSpacesCached(floor.walls, floor.openings)
+      ? deadSpacesCached(blockingWallSegments, floor.openings)
       : [];
     // Walls as light meets them (issue #143), same as the card — so dropping a
     // door into a wall spills the pool through it while you are still drawing.
     // Skipped entirely on a floor with no cast light, which is most of them:
     // this sits on the path of every keystroke and drag in the editor.
     const lightWalls = floor.items.some((it) => it.glow)
-      ? wallsLightPassesThrough(floor.walls, floor.openings, (o) => {
+      ? wallsLightPassesThrough(blockingWallSegments, floor.openings, (o) => {
           const amt = (id?: string) =>
             resolveOpeningAmount(o, id ? this.hass?.states[id] : undefined);
           // Same reading as the card, second leaf included (issue #145),
@@ -3130,7 +3680,7 @@ export class FloorplanCardEditor extends LitElement {
             o.shutterEntity ? shutterAmount(this.hass?.states[o.shutterEntity], o.shutterInvert) : undefined
           );
         })
-      : floor.walls;
+      : blockingWallSegments;
     const floorEmpty =
       !floor.walls.length &&
       !floor.openings.length &&
@@ -3158,7 +3708,9 @@ export class FloorplanCardEditor extends LitElement {
         <div class="toolbar">
           <!-- Tools — modes; exactly one is active at a time -->
           <div class="seg" role="group" aria-label="Tool">
-            ${(["select", "wall", "door", "window", "tracker", "area"] as Tool[]).map(
+            ${(
+              ["select", "wall", "door", "window", "skylight", "tracker", "area"] as Tool[]
+            ).map(
               (t) => html`
                 <button
                   class=${this._tool === t ? "active" : ""}
@@ -3170,6 +3722,10 @@ export class FloorplanCardEditor extends LitElement {
                     this._draftTracker = null;
                     this._draftArea = null;
                     this._areaHover = null;
+                    this._areaDragStart = null;
+                    this._areaDragCurrent = null;
+                    this._clearAreaDragTimer();
+                    this._areaDragMoved = false;
                   }}
                 >
                   <ha-icon icon=${TOOL_META[t].icon}></ha-icon>${TOOL_META[t].label}
@@ -3427,7 +3983,9 @@ export class FloorplanCardEditor extends LitElement {
           <div class="stage ${overlay === "plan" ? "scale-plan" : ""}"
                style="aspect-ratio: ${cssNumber(c.width, DEFAULT_WIDTH)} / ${cssNumber(
             c.height, DEFAULT_HEIGHT)}; width:${this._zoom * 100}%;
-                   --fp-plan-w: ${cssNumber(c.width, DEFAULT_WIDTH)};${skinStyle(
+                   --fp-plan-w: ${cssNumber(c.width, DEFAULT_WIDTH)};${overlayMinW === undefined
+            ? ""
+            : `--fp-min-w: ${overlayMinW}px;`}${skinStyle(
             c.skin
           )}${paletteStyle(c.palette)}">
             <!-- Keyed on the skin and the palette, for the repaint reason
@@ -3516,7 +4074,13 @@ export class FloorplanCardEditor extends LitElement {
               }
               ${floor.furniture.map((f) => this._renderFurnitureSel(f))}
               ${renderWallMask(floor.openings, c.width, c.height, this._wallMaskId)}
-              ${floor.walls.map((w) => this._renderWall(w))}
+              ${(() => {
+                const renderWall = (
+                  w: Wall,
+                  sideWallInfo?: { area: Area; side: RectAreaSide; edgeIndex: number }
+                ) => this._renderWall(w, sideWallInfo);
+                return [...floor.walls, ...generatedWallSegments].map((w) => renderWall(w, sideWallLookup.get(w.id)));
+              })()}
               <!-- Room outlines, same layer position as the card so what you
                    place is what you get. Only a static borderColor draws here,
                    there being no hass to resolve a live color from — but the
@@ -3571,6 +4135,7 @@ export class FloorplanCardEditor extends LitElement {
             </svg>`
             )}
             <div class="items">
+              ${(c.floors ?? []).length > 1 ? this._renderSwitcherHandle(c) : nothing}
               ${floor.texts.map((t) => this._renderTextOverlay(t, c, overlay))}
               ${floor.openings
                 .filter((o) => hasShutterMark(o))
@@ -4112,22 +4677,44 @@ export class FloorplanCardEditor extends LitElement {
     `;
   }
 
-  private _renderWall(w: Wall): TemplateResult {
+  private _renderWall(
+    w: Wall,
+    sideWallInfo?: { area: Area; side: RectAreaSide; edgeIndex: number }
+  ): TemplateResult {
     const selected = this._isSel("wall", w.id);
     // A pinned wall still *looks* selected — it is — but shows no endpoint
     // handles (issue #191): they would be drawn as grab targets that refuse
     // to grab, and their absence is the clearest signal on the canvas that
     // the wall is pinned.
     const handles = selected && !w.locked;
+    const sideWallSide = sideWallInfo?.side;
+    const sideWallIndex = sideWallInfo?.edgeIndex ?? -1;
+    const sideWallToggle = !!sideWallInfo && !sideWallInfo.area.locked;
+    const sideState = sideWallInfo?.area.sideWalls?.[sideWallSide!];
+    const sideIsHorizontal = Math.abs(w.y1 - w.y2) < RECT_AREA_EPSILON;
+    const edgeCursorClass = sideIsHorizontal ? "ns" : "ew";
+    const style = w.divider ? dividerStrokeStyle() : wallStrokeStyle(w.thickness, w.kind);
     return svg`
       <g>
         <line x1=${w.x1} y1=${w.y1} x2=${w.x2} y2=${w.y2}
-              class="wall-hit"
-              @pointerdown=${(e: PointerEvent) => this._startDrag(e, { kind: "wall", id: w.id })} />
+              class=${["wall-hit", sideWallInfo ? "side-wall-edge" : "", edgeCursorClass].filter(Boolean).join(" ")}
+              @pointerdown=${(e: PointerEvent) => {
+                if (sideWallInfo) {
+                  this._startDrag(e, { kind: "area", id: sideWallInfo.area.id }, undefined, undefined, sideWallIndex);
+                  return;
+                }
+                this._startDrag(e, { kind: "wall", id: w.id });
+              }}
+              @dblclick=${(e: PointerEvent) => {
+                if (!sideWallInfo) return;
+                e.preventDefault();
+                e.stopPropagation();
+                this._toggleRectAreaSide(sideWallInfo.area, sideWallIndex);
+              }} />
         <g class="fp-wall-neon"><line x1=${w.x1} y1=${w.y1} x2=${w.x2} y2=${w.y2}
-              class="wall ${selected ? "selected" : ""}"
+            class="wall ${selected ? "selected" : ""} ${isRailing(w) ? "railing" : ""} ${sideWallInfo ? "side-wall-edge" : ""} ${edgeCursorClass}"
               mask=${`url(#${this._wallMaskId})`}
-              style=${wallStrokeStyle(w.thickness)} stroke-linecap="round" /></g>
+              style=${style} stroke-linecap="round" /></g>
         ${
           handles
             ? svg`
@@ -4137,6 +4724,25 @@ export class FloorplanCardEditor extends LitElement {
                 <circle cx=${w.x2} cy=${w.y2} r="9" class="handle"
                         @pointerdown=${(e: PointerEvent) =>
                           this._startDrag(e, { kind: "wall", id: w.id }, 2)} />`
+            : nothing
+        }
+        ${
+          sideWallToggle
+            ? svg`
+                <path
+                  d=${(() => {
+                    const cx = (w.x1 + w.x2) / 2;
+                    const cy = (w.y1 + w.y2) / 2;
+                    const s = 7;
+                    return `M ${cx} ${cy - s} L ${cx + s} ${cy} L ${cx} ${cy + s} L ${cx - s} ${cy} Z`;
+                  })()}
+                  class=${["area-wall-toggle", sideState ?? "none"].join(" ")}
+                  title=${sideState ? `Double-click to cycle this ${sideWallSide} wall: ${sideState}` : `Double-click to add a wall on the ${sideWallSide} side`}
+                  @dblclick=${(e: PointerEvent) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this._toggleRectAreaSide(sideWallInfo!.area, sideWallIndex);
+                  }} />`
             : nothing
         }
       </g>`;
@@ -4163,6 +4769,25 @@ export class FloorplanCardEditor extends LitElement {
             ? { amount: 0.55, style: shutterStyleOf(o), flip: o.shutterFlipV }
             : undefined,
         })}
+        ${
+          // A skylight is an outline around empty floor, and the strokes are
+          // all there is to grab: without this you can only pick it up by its
+          // frame or by a dashed diagonal, which on a large roof light means
+          // most of the shape you are looking at does not answer the pointer.
+          // The card gives every pressable opening the same target for the
+          // same reason (openingHitSize); the wall openings do not need one
+          // here because a door's own symbol is barely wider than the target
+          // would be.
+          openingIsSkylight(o)
+            ? (() => {
+                const hit = openingHitSize(o);
+                return svg`<rect class="skylight-hit"
+                    x=${o.x - hit.width / 2} y=${o.y - hit.height / 2}
+                    width=${hit.width} height=${hit.height}
+                    transform="rotate(${o.angle} ${o.x} ${o.y})" />`;
+              })()
+            : nothing
+        }
       </g>`;
   }
 
@@ -4251,10 +4876,24 @@ export class FloorplanCardEditor extends LitElement {
     </p>`;
   }
 
+  private _toggleRectAreaSide(a: Area, edgeIndex: number): void {
+    if (a.locked) return;
+    const side = RECT_AREA_SIDES[edgeIndex % RECT_AREA_SIDES.length];
+    const next = rectAreaSideWallNext(a.sideWalls?.[side]);
+    const sideWalls = { ...(a.sideWalls ?? {}) };
+    if (next === "none") delete sideWalls[side];
+    else sideWalls[side] = next;
+    this._updateArea(a.id, { sideWalls: Object.keys(sideWalls).length ? sideWalls : undefined });
+  }
+
   private _renderAreaSel(a: Area, scopingId?: string): TemplateResult {
     const selected = this._isSel("area", a.id);
     const scoping = a.id === scopingId;
     const pts = a.points.map((p) => `${p.x},${p.y}`).join(" ");
+    const sharedSides = (this._floor().areas ?? [])
+      .filter((other) => other.id !== a.id)
+      .flatMap((other) => rectAreaSharedSides(a.points, other.points).map((side) => ({ side, otherId: other.id })))
+      .filter(({ otherId }) => a.id.localeCompare(otherId) < 0);
     return svg`
       <g class="area-hit ${selected ? "selected" : ""} ${scoping ? "scoping" : ""}">
         ${scoping ? svg`<polygon points=${pts} class="area-scoping" />` : nothing}
@@ -4262,28 +4901,90 @@ export class FloorplanCardEditor extends LitElement {
         <polygon points=${pts} class="area-hit-shape"
                  @pointerdown=${(e: PointerEvent) => this._startDrag(e, { kind: "area", id: a.id })} />
         ${selected ? svg`<polygon points=${pts} class="area-outline" />` : nothing}
+        ${sharedSides.map(({ side }) => {
+          const index = RECT_AREA_SIDES.indexOf(side);
+          const start = a.points[index]!;
+          const end = a.points[(index + 1) % a.points.length]!;
+          const mid = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+          const s = 8;
+          const d =
+            side === "top" || side === "bottom"
+              ? `M ${mid.x - s} ${mid.y - s} L ${mid.x + s} ${mid.y + s} M ${mid.x - s} ${mid.y + s} L ${mid.x + s} ${mid.y - s}`
+              : `M ${mid.x - s} ${mid.y + s} L ${mid.x + s} ${mid.y - s} M ${mid.x - s} ${mid.y - s} L ${mid.x + s} ${mid.y + s}`;
+          return svg`<path d=${d} class="area-shared-wall" />`;
+        })}
         ${
-          // Outline yes, vertex handles no, for a pinned room — same reasoning
-          // as the wall's endpoints (issue #191): still visibly selected, with
-          // nothing on it that pretends to be draggable.
+          // Outline yes, vertex and edge handles no, for a pinned room — same
+          // reasoning as the wall's endpoints (issue #191): still visibly
+          // selected, with nothing on it that pretends to be draggable.
           selected && !a.locked
-            ? a.points.map(
-                (p, i) => svg`
-                  <circle cx=${p.x} cy=${p.y} r="7" class="handle"
-                          @pointerdown=${(e: PointerEvent) =>
-                            this._startDrag(e, { kind: "area", id: a.id }, undefined, i)} />`
-              )
+            ? [
+                ...a.points.map(
+                  (p, i) => svg`
+                    <circle cx=${p.x} cy=${p.y} r="7" class="handle"
+                            @pointerdown=${(e: PointerEvent) =>
+                              this._startDrag(e, { kind: "area", id: a.id }, undefined, i)} />`
+                ),
+                ...(isRectArea(a.points)
+                  ? [
+                      ...a.points.map((p, i) => {
+                        const next = a.points[(i + 1) % a.points.length];
+                        const isHorizontal = Math.abs(p.y - next.y) < RECT_AREA_EPSILON;
+                        const cursorClass = isHorizontal ? "ns" : "ew";
+                        return svg`
+                          <line
+                            x1=${p.x} y1=${p.y} x2=${next.x} y2=${next.y}
+                            class=${["area-edge-hit", cursorClass].join(" ")}
+                            @pointerdown=${(e: PointerEvent) => {
+                              this._startDrag(e, { kind: "area", id: a.id }, undefined, undefined, i);
+                            }}
+                            @dblclick=${(e: PointerEvent) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              this._toggleRectAreaSide(a, i);
+                            }} />`;
+                      }),
+                      ...a.points.map((p, i) => {
+                        const next = a.points[(i + 1) % a.points.length];
+                        const mid = { x: (p.x + next.x) / 2, y: (p.y + next.y) / 2 };
+                        const isHorizontal = Math.abs(p.y - next.y) < RECT_AREA_EPSILON;
+                        const side = RECT_AREA_SIDES[i]!;
+                        const sideState = a.sideWalls?.[side];
+                        return svg`
+                          <circle
+                            cx=${mid.x}
+                            cy=${mid.y}
+                            r="5"
+                            class=${[
+                              "handle",
+                              "area-edge-handle",
+                              isHorizontal ? "ns" : "ew",
+                              sideState ? "side-wall-toggle" : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                            title=${sideState ? `Double-click to cycle this ${side} wall: ${sideState}` : `Double-click to add a wall on the ${side} side`}
+                            @pointerdown=${(e: PointerEvent) =>
+                              this._startDrag(e, { kind: "area", id: a.id }, undefined, undefined, i)}
+                            @dblclick=${(e: PointerEvent) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              this._toggleRectAreaSide(a, i);
+                            }} />`;
+                      }),
+                    ]
+                  : []),
+              ]
             : nothing
         }
       </g>`;
   }
 
   /**
-   * The in-progress Area draft: committed vertices as dots, straight segments
-   * between them, and — while a live pointer position is known — a dashed
-   * "rubber band" segment from the last vertex to the cursor. Once 3+ points
-   * are down the starting vertex is drawn larger/hollow so it's visually
-   * obvious that clicking it closes the polygon (see `_onCanvasDown`).
+  * The in-progress Area draft: committed vertices as dots and straight
+  * segments between them. Once 3+ points are down the starting vertex is
+  * drawn larger/hollow so it's visually obvious that clicking it closes the
+  * polygon (see `_onCanvasDown`).
    */
   private _renderAreaDraft(): TemplateResult | typeof nothing {
     const draft = this._draftArea;
@@ -4522,6 +5223,211 @@ export class FloorplanCardEditor extends LitElement {
     `;
   }
 
+  /**
+   * The floor switcher, draggable on the canvas (issue #281) — "the most
+   * flexible solution would be to make this part freely movable, like a piece
+   * of furniture", and the maintainer's "lets start with full freedom".
+   *
+   * Deliberately **not** a {@link SelKind}. Every kind in that union names a
+   * per-floor array of things with ids, and the editor's machinery reads it
+   * that way throughout: snapshots, group drags, locking, duplicate, delete,
+   * the selection summary and its icon. The switcher is one card-level thing
+   * with no id, and none of those operations mean anything for it — adding a
+   * kind would have put a special case in each of them, which is a lot of
+   * places to be wrong in.
+   *
+   * So it carries its own small drag instead: three handlers and one field,
+   * touching nothing the selection model owns.
+   */
+  private _renderSwitcherHandle(c: FloorplanCardConfig): TemplateResult {
+    // (see switcherHandleHome for where an unplaced handle sits)
+    const w = cssNumber(c.width, DEFAULT_WIDTH);
+    const h = cssNumber(c.height, DEFAULT_HEIGHT);
+    const at = floorSwitcherAnchor(c) ?? switcherHandleHome(w, h);
+    const placed = !!floorSwitcherAnchor(c);
+    const floors = c.floors ?? [];
+    return html`
+      <div
+        class="switcher-handle ${c.compactHeader === true ? "row" : ""} ${this
+          ._switcherDrag
+          ? "dragging"
+          : ""} ${placed ? "" : "default"} ${this._tool === "select" ? "" : "passive"}"
+        style="left:${(at.x / w) * 100}%; top:${(at.y / h) * 100}%;"
+        title=${placed
+          ? "Drag to move the floor switcher"
+          : "Drag to move the floor switcher off the corner"}
+        @pointerdown=${this._onSwitcherDown}
+        @lostpointercapture=${this._onSwitcherCancel}
+      >
+        ${floors.map(
+          (f: Floor) => html`<span class="sh-btn ${f.id === this._activeFloorId ? "active" : ""}"
+            >${f.short || f.name}</span
+          >`
+        )}
+      </div>
+    `;
+  }
+
+  private _onSwitcherDown = (ev: PointerEvent): void => {
+    if (this._tool !== "select") return;
+    // Primary button only, as `_onCanvasDown` requires. A right-button press
+    // reports `buttons === 2`, which the no-buttons guard below does not catch
+    // — so without this a right-drag repositioned the switcher instead of
+    // opening the context menu.
+    if (ev.button !== 0) return;
+    // One gesture at a time, the same gate every other pointer path honours.
+    // Without it a second touch could start this drag on top of a live element
+    // drag or marquee, and two touches on the handle could overwrite each
+    // other's rollback state.
+    if (this._gesturePointer !== null) return;
+    // Kept off the canvas: without this the pointerdown reaches the stage and
+    // starts a marquee behind the thing being dragged.
+    ev.stopPropagation();
+    // preventDefault suppresses native focusing, so move focus explicitly, the
+    // way `_onOverlayDown` does. It is not cosmetic here: the handle is not
+    // focusable, so focus would otherwise stay in whatever was focused before —
+    // and starting the drag from the X/Y fields left it in a text input, where
+    // `isTypingPath` rejects Escape and the drag could not be canceled at all.
+    ev.preventDefault();
+    this._canvasWrap?.focus({ preventScroll: true });
+    const handle = ev.currentTarget as Element;
+    // The editor's guarded helper, not the DOM method: setPointerCapture
+    // throws for a pointer that is not active, which a synthetic or
+    // re-targeted event can easily be.
+    this._switcherDrag = {
+      pointerId: ev.pointerId,
+      handle,
+      moved: false,
+      at: this._toVirtual(ev, false),
+      before: this._config,
+      priorFuture: this._future,
+    };
+    this._gesturePointer = ev.pointerId;
+    this._capturePointer(ev, handle);
+  };
+
+  private _onSwitcherMove = (ev: PointerEvent): void => {
+    const d = this._switcherDrag;
+    if (!d || d.pointerId !== ev.pointerId) return;
+    ev.stopPropagation();
+    // A move with nothing held means the release never reached us (alt-tab, a
+    // dialog taking the pointer). The other drags treat that as a cancel
+    // rather than letting the element chase the hovering cursor.
+    if (ev.buttons === 0) {
+      this._forgetSwitcherTouch(ev);
+      this._cancelGesture();
+      return;
+    }
+    const raw = this._toVirtual(ev, false);
+    // Below the slop a press is a click, not a drag. Without this the browser
+    // delivering a zero- or one-pixel move on an ordinary click would push
+    // history and write a position — which is exactly what the "a click does
+    // not place it" rule promises it will not do.
+    // `<=`, matching `_applyDrag` exactly: at precisely the slop this is a
+    // click everywhere else in the editor, and one control disagreeing about
+    // where a click stops being a click is the kind of difference nobody finds
+    // on purpose.
+    if (!d.moved && Math.hypot(raw.x - d.at.x, raw.y - d.at.y) <= DRAG_SLOP) return;
+    // History once per drag, not once per frame, so undo steps back over the
+    // whole move. The snapshot it pushes is the config as it stood before —
+    // which is what a rollback puts back, and removes from the stack.
+    if (!d.moved) {
+      d.priorHistory = this._history;
+      this._pushHistory();
+      d.moved = true;
+    }
+    // Local, not emitted. Every other drag in this editor writes to `_config`
+    // while it is live and emits once on release, and both halves matter: the
+    // host is spared a `config-changed` (and the card-stack re-render behind
+    // it) per frame, and — because nothing has been emitted — a rollback can
+    // put the old config back locally instead of emitting its way out.
+    this._switcherMoves.push(this._toVirtual(ev));
+  };
+
+  private _onSwitcherUp = (ev: PointerEvent): void => {
+    const d = this._switcherDrag;
+    if (!d || d.pointerId !== ev.pointerId) return;
+    // Stopped here, in the capture phase, so no target underneath — the canvas,
+    // a badge — also treats this release as the end of a gesture of its own.
+    ev.stopPropagation();
+    this._forgetSwitcherTouch(ev);
+    this._releasePointer(ev, d.handle);
+    // Land where the pointer was actually released. The last `pointermove` is
+    // not a safe stand-in: moves are coalesced, and a release can report a
+    // point no move ever did, so settling the queue alone would drop the
+    // switcher short of where it was let go. Only once the drag has moved —
+    // a press that never passed the slop is a click, and still places nothing.
+    // Settled while `_switcherDrag` is set, since the coalescer checks it.
+    if (d.moved) this._switcherMoves.push(this._toVirtual(ev));
+    this._switcherMoves.settle();
+    this._switcherDrag = undefined;
+    this._gesturePointer = null;
+    // `_emit`, not `_commit`: the history entry was pushed at first movement,
+    // and committing would push the finished position as a second one — so the
+    // first undo would restore the config you are already looking at.
+    //
+    // A press that never passed the slop emits nothing: it would otherwise pin
+    // the switcher to wherever the corner happened to be, turning a stray tap
+    // into an edit.
+    if (d.moved) this._emit(this._config);
+  };
+
+  /**
+   * A drag taken away rather than finished — a touch interrupted, a dialog
+   * stealing the pointer, capture lost, Escape.
+   *
+   * The work is in `_rollBackSwitcherDrag` so that `_cancelGesture` can call it
+   * too: routing every abort through the editor's one cancel path is what puts
+   * this gesture on the Escape cascade and the no-buttons guard without either
+   * of them having to know it exists.
+   */
+  private _onSwitcherCancel = (ev: PointerEvent): void => {
+    const d = this._switcherDrag;
+    if (!d || d.pointerId !== ev.pointerId) return;
+    ev.stopPropagation();
+    this._forgetSwitcherTouch(ev);
+    this._releasePointer(ev, d.handle);
+    this._rollBackSwitcherDrag();
+  };
+
+  /**
+   * Take the drag's finger out of the pinch bookkeeping.
+   *
+   * `_onWrapPointerDown` counts every touch that lands on the canvas, the
+   * switcher's included, and only `_onWrapPointerEnd` takes it out again. The
+   * drag's own listeners run first — on the shadow root, above `.canvas-wrap`
+   * — and stop the event, so that end handler never hears this finger lift.
+   * Left counted, the next single touch reads as a second finger and starts a
+   * pinch nobody is making. Called on every path that ends the drag's pointer,
+   * before the event is stopped from reaching the wrap.
+   */
+  private _forgetSwitcherTouch(ev: PointerEvent): void {
+    this._onWrapPointerEnd(ev);
+  }
+
+  /**
+   * Put the config back as it was before the switcher drag started.
+   *
+   * Nothing was emitted while it was live, so the host still holds the pre-drag
+   * config and restoring it locally spares a round trip. The undo stack and the
+   * redo stack are both put back as they stood before the first-movement push,
+   * so a canceled drag is a complete no-op — the same contract `_cancelGesture`
+   * keeps for an element drag.
+   */
+  private _rollBackSwitcherDrag(): void {
+    const d = this._switcherDrag;
+    if (!d) return;
+    // Whatever is queued is about to be replaced by the pre-drag config.
+    this._switcherMoves.cancel();
+    this._switcherDrag = undefined;
+    this._gesturePointer = null;
+    if (!d.moved) return;
+    if (d.priorHistory) this._history = d.priorHistory;
+    this._config = d.before;
+    this._watchedEntities = collectWatchedEntities(d.before);
+    this._future = d.priorFuture;
+  }
+
   private _renderTextOverlay(
     t: FloorText,
     c: FloorplanCardConfig,
@@ -4627,6 +5533,13 @@ export class FloorplanCardEditor extends LitElement {
           this._renderPalettePanel()
         )}
         ${this._renderGroup(
+          // Where the floor switcher sits (issue #281). Under Project because
+          // it is one control for the whole card, not a property of a floor —
+          // and next to the plan's own look, which is what it sits on.
+          "Floor switcher",
+          this._renderSwitcherPlacement()
+        )}
+        ${this._renderGroup(
           // Per floor, not per project — but it is the floor's paper, so it
           // belongs beside the plan's own.
           "Floor image",
@@ -4641,12 +5554,19 @@ export class FloorplanCardEditor extends LitElement {
           "Display",
           this._renderForm(
             formSlice(display, [
+              "view",
+              "wallHeight",
+              "wallOpacity",
               "rotation",
               "rotationPortrait",
               "rotationLandscape",
               "overlayScale",
+              "overlayMinWidth",
               "compactHeader",
+              "zoomedOverlayAuto",
               "zoomedOverlayScale",
+              "roomFocusControls",
+              "roomFocusInterval",
             ]),
             patch
           )
@@ -4914,6 +5834,109 @@ export class FloorplanCardEditor extends LitElement {
     return paletteEntries(config.palette).some((p) => paletteSlug(p.name) === slug);
   }
 
+  /**
+   * Says where the switcher is and offers the way back (issue #281).
+   *
+   * Placing is a drag on the canvas, so this is not a second way to set the
+   * position — it is the half a drag cannot express: returning to the corner.
+   * Without it, dropping the switcher once would be irreversible except by
+   * hand-editing YAML.
+   */
+  private _renderSwitcherPlacement(): TemplateResult {
+    const at = floorSwitcherAnchor(this._config);
+    const floors = this._config.floors ?? [];
+    const w = cssNumber(this._config.width, DEFAULT_WIDTH);
+    const h = cssNumber(this._config.height, DEFAULT_HEIGHT);
+    return html`
+      <div class="row col">
+        <label>Position</label>
+        ${floors.length > 1
+          ? html`<span class="hint"
+                >${at
+                  ? "Drag it on the canvas, or type the point here."
+                  : "In the plan's top-right corner. Drag it on the canvas, or type a point here."}</span
+              >
+              <!-- Coordinates as well as the drag, because the drag is the only
+                   way to place it and a pointer is not the only way people
+                   work: the handle takes no keyboard, so without these there
+                   would be no keyboard path to the feature at all. They are
+                   also the precise option, for a plan being nudged a few units
+                   rather than aimed by eye. -->
+              <div class="row wide">
+                <!-- The visible <label>s are siblings rather than wrappers, so
+                     they name nothing as far as assistive tech is concerned:
+                     a screen reader would announce two unlabelled spinbuttons
+                     and leave you to guess which is which. The aria-label is
+                     what carries the name, and says the unit as well, since
+                     "X" alone does not tell you these are canvas units. -->
+                <label aria-hidden="true">X</label>
+                <!-- The exact stored number, not a rounded one. With Snap off
+                     (or a hand-written config) an anchor is legitimately
+                     fractional, and a field that showed 12 for a stored 12.4
+                     would be lying about where the switcher is — then rewrite
+                     it to 13 the moment anyone touched the spinner. These are
+                     meant to be the precise way to place it. Hence step="any"
+                     as well: a number input defaults to whole steps, which
+                     marks a stored 60.4 invalid and lets the spinner snap it. -->
+                <input
+                  type="number"
+                  step="any"
+                  aria-label="Floor switcher X, in canvas units"
+                  .value=${at ? String(at.x) : ""}
+                  placeholder=${Math.round(switcherHandleHome(w, h).x)}
+                  @change=${(e: Event) => this._setSwitcherCoord("x", (e.target as HTMLInputElement).value)}
+                />
+                <label aria-hidden="true">Y</label>
+                <input
+                  type="number"
+                  step="any"
+                  aria-label="Floor switcher Y, in canvas units"
+                  .value=${at ? String(at.y) : ""}
+                  placeholder=${Math.round(switcherHandleHome(w, h).y)}
+                  @change=${(e: Event) => this._setSwitcherCoord("y", (e.target as HTMLInputElement).value)}
+                />
+              </div>
+              ${at
+                ? html`<div class="row wide">
+                    <button @click=${() => this._patchConfig({ floorSwitcher: undefined })}>
+                      Back to the corner
+                    </button>
+                  </div>`
+                : nothing}`
+          : html`<span class="hint"
+              >A plan with one floor draws no switcher. Add a second floor and it appears
+              here.</span
+            >`}
+      </div>
+    `;
+  }
+
+  /**
+   * Set one coordinate from the panel's number fields.
+   *
+   * Typing into one of them while the switcher is still in its default corner
+   * has to place it, which means inventing the other half — and the only
+   * honest answer is where the handle is actually drawn, since that is what
+   * the field's placeholder has been showing.
+   *
+   * An emptied field returns the switcher to the corner rather than storing a
+   * half-position: `floorSwitcher` is a point or it is nothing, which is the
+   * rule `floorSwitcherAnchor` enforces at the other end.
+   */
+  private _setSwitcherCoord(axis: "x" | "y", raw: string): void {
+    const n = Number(raw);
+    if (raw.trim() === "" || !Number.isFinite(n)) {
+      this._patchConfig({ floorSwitcher: undefined });
+      return;
+    }
+    const w = cssNumber(this._config.width, DEFAULT_WIDTH);
+    const h = cssNumber(this._config.height, DEFAULT_HEIGHT);
+    const base = floorSwitcherAnchor(this._config) ?? switcherHandleHome(w, h);
+    this._patchConfig({
+      floorSwitcher: { ...base, [axis]: n },
+    });
+  }
+
   private _renderSymbolsPanel(): TemplateResult {
     const own = Object.keys(this._config.symbols ?? {});
     return html`
@@ -5014,7 +6037,11 @@ export class FloorplanCardEditor extends LitElement {
           const dc = entity
             ? (this.hass?.states[entity]?.attributes?.device_class as string | undefined)
             : undefined;
-          patch = { ...patch, ...(dc ? openingFromDeviceClass(dc) : {}) };
+          // …but never over a skylight, which is why this goes through
+          // `openingDeviceClassPatch` rather than asking the device class
+          // directly: that function owns the exception, and owning it
+          // somewhere reachable is what makes it testable.
+          patch = { ...patch, ...openingDeviceClassPatch(o, dc) };
         }
         this._applyElementPatch("opening", o.id, patch, live);
       };
@@ -5875,6 +6902,10 @@ export class FloorplanCardEditor extends LitElement {
     .fp-wall-neon {
       filter: var(--fp-skin-wall-filter, none);
     }
+    /* Thin, as the card draws a railing (issue #182) — see the card's rule. */
+    line.wall.railing {
+      stroke-width: calc(var(--fp-skin-wall-width, 8) * 0.4);
+    }
     line.wall.selected {
       stroke: var(--primary-color, #03a9f4);
     }
@@ -5911,8 +6942,22 @@ export class FloorplanCardEditor extends LitElement {
       stroke-width: 22;
       cursor: move;
     }
+    .wall-hit.side-wall-edge.ns,
+    .wall.side-wall-edge.ns {
+      cursor: ns-resize;
+    }
+    .wall-hit.side-wall-edge.ew,
+    .wall.side-wall-edge.ew {
+      cursor: ew-resize;
+    }
     .opening-hit {
       cursor: move;
+    }
+    /* The skylight's grab area — invisible, but painted, which is what makes
+       it hit-testable at all: a fill of none would leave the rectangle as empty
+       as the floor under it. */
+    .skylight-hit {
+      fill: transparent;
     }
     .furn-hit {
       cursor: move;
@@ -6159,6 +7204,50 @@ export class FloorplanCardEditor extends LitElement {
       stroke-width: 1.5;
       cursor: grab;
     }
+    .area-shared-wall {
+      fill: none;
+      stroke: var(--secondary-text-color, #666);
+      stroke-width: 1;
+      stroke-linecap: round;
+      stroke-dasharray: 3 4;
+      opacity: 0.22;
+      pointer-events: none;
+      vector-effect: non-scaling-stroke;
+    }
+    .area-edge-hit {
+      stroke: transparent;
+      stroke-width: 18;
+      cursor: pointer;
+      pointer-events: stroke;
+    }
+    .area-edge-hit.ew,
+    .area-edge-handle.ew,
+    .area-wall-toggle.ew {
+      cursor: ew-resize;
+    }
+    .area-edge-hit.ns,
+    .area-edge-handle.ns,
+    .area-wall-toggle.ns {
+      cursor: ns-resize;
+    }
+    .area-edge-handle.side-wall-toggle.ew,
+    .area-edge-handle.side-wall-toggle.ns,
+    .area-wall-toggle {
+      cursor: pointer;
+      fill: var(--card-background-color, #fff);
+      stroke: var(--fp-skin-wall, var(--primary-text-color));
+      stroke-width: 2;
+      stroke-linejoin: round;
+      vector-effect: non-scaling-stroke;
+    }
+    .area-wall-toggle.wall {
+      fill: var(--fp-skin-wall, var(--primary-text-color));
+      stroke: var(--fp-skin-wall, var(--primary-text-color));
+    }
+    .area-wall-toggle.divider {
+      fill: var(--card-background-color, #fff);
+      stroke-dasharray: 2 2;
+    }
     .items {
       position: absolute;
       inset: 0;
@@ -6209,7 +7298,8 @@ export class FloorplanCardEditor extends LitElement {
     }
     @supports (container-type: inline-size) and (width: 1cqw) {
       .stage.scale-plan .items {
-        --fp-u: calc(100cqw / var(--fp-plan-w));
+        /* overlayMinWidth clamps the unit exactly as the card does. */
+        --fp-u: calc(max(100cqw, var(--fp-min-w, 0px)) / var(--fp-plan-w));
       }
     }
     /* Label padding and offsets go to em so they track the text with the plan,
@@ -7096,6 +8186,74 @@ export class FloorplanCardEditor extends LitElement {
       background: var(--fp-inactive);
       border-color: var(--fp-inactive);
       color: var(--fp-ink, var(--text-primary-color, #212121));
+    }
+    /* The floor switcher's drag handle (issue #281). Drawn as the switcher it
+       stands for rather than as a generic grip, so what you drag looks like
+       what you are placing — and centred on its anchor, which is what makes
+       the drop land where the pointer is. */
+    .switcher-handle {
+      position: absolute;
+      /* The overlay it sits in is pointer-events:none so clicks reach the
+         canvas underneath; anything in there that is meant to be grabbed has
+         to turn them back on for itself. Without this the handle drew
+         perfectly and could not be picked up at all. */
+      pointer-events: auto;
+      transform: translate(-50%, -50%);
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      cursor: grab;
+      touch-action: none;
+      z-index: 4;
+    }
+    /* Only the Select tool moves the switcher, so under a drawing tool the
+       handle is just in the way: it sits above the canvas and would swallow a
+       wall, door or area gesture started beneath it, since its own pointerdown
+       handler ignores every tool but Select. It stays visible, as the footprint
+       the card's buttons will cover, and lets the pointer through. */
+    .switcher-handle.passive {
+      pointer-events: none;
+      cursor: default;
+    }
+    .switcher-handle.dragging {
+      cursor: grabbing;
+    }
+    /* Compact chrome lays the card's buttons across a row rather than down a
+       column (issue #152), and the handle has to agree: its whole job is to
+       show the footprint the block will have, and a column standing in for a
+       row can sit happily in a gap the real thing overflows. Wrapped and
+       centred for the same reason the card's is wrapped — eight floors is
+       exactly the case a row is worst at. */
+    .switcher-handle.row {
+      flex-direction: row;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: 50%;
+    }
+    /* Dimmed until it has been placed, so the canvas does not claim a position
+       is stored when none is. Its tooltip says the same thing in words. */
+    .switcher-handle.default {
+      opacity: 0.55;
+    }
+    .switcher-handle .sh-btn {
+      border: 1px solid var(--divider-color, #ccc);
+      background: var(--card-background-color, #fff);
+      color: var(--primary-text-color);
+      border-radius: 6px;
+      padding: 3px 7px;
+      font-size: 11px;
+      line-height: 1;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+      max-width: 110px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    .switcher-handle .sh-btn.active {
+      background: var(--primary-color, #03a9f4);
+      color: var(--text-primary-color, #fff);
+      border-color: var(--primary-color, #03a9f4);
     }
     .state-color-rule select {
       flex: 0 0 96px;

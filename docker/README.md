@@ -272,3 +272,45 @@ The alternative, when the angle matters more than the hour, is to turn
 A stated bearing keeps the light on around the clock by design, so it needs no
 container changes at all — but it pins the elevation at full, so it will not
 show you the dusk ramp or the way reach shortens as the sun climbs.
+
+
+## Checking the roller shutter's sunlight
+
+The demo enables sunlight and gives window `o1` an explicit `motion: roll`.
+The demo cover has no shutter device class, so omitting that motion would test a
+clear window instead of the roller-shutter case in PR #271.
+
+After updating an existing development instance, run `npm run ha:reseed` to load
+the changed demo plan. For a repeatable comparison, turn off the **history generator**
+on the History view (it moves covers automatically). In the card editor, turn
+**Follow the sun** off to disable night-time dimming, turn **Follow the real sun**
+off under the sunlight controls, and set **Sun from** to `0` degrees, facing the
+top wall's shutter. The equivalent card settings are `sunDimming: false` and
+`sunBearing: 0`; keep `sunlight: true`.
+
+Use `cover.living_room_window` on the History view to set its position to 100%,
+50%, then 0%. Return to the Plan view at each position: sunlight through the top
+window should shrink with the opening and disappear at 0%. The same plan, sun
+bearing and lamp states should be used for every screenshot. Before this fix,
+the sunlight patch remained even at 0% because the rolled-down shutter was treated
+as clear glazing.
+
+
+## 3D development preview
+
+For a quick visual check without starting Home Assistant:
+
+```bash
+npx vite --host 127.0.0.1 --port 5261
+```
+
+Open [the 3D preview](http://127.0.0.1:5261/docker/3d-preview.html). It imports the
+actual card source and supplies simulated entities. Change the viewing corner,
+wall height and opacity; toggle doors, the roof window and its blind, and day/night; tap a room to check zoom.
+The icon placeholder is local to this preview. Use the HA container above to
+check real entity services, HA icons, editor selectors and history playback.
+
+To use 3D in that container, choose **Project → Display → View → 3D isometric**
+or add `view: 3d` to its card YAML. Older `projection: iso` configurations still
+work. Nothing is reseeded or changed in an existing dashboard by the standalone
+preview.

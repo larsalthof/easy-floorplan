@@ -60,6 +60,8 @@ export interface Wall {
   y1: number;
   x2: number;
   y2: number;
+  /** Divider line, drawn with the wall styling but dashed to read as a cut. */
+  divider?: boolean;
   /**
    * Stroke width in virtual units. Defaults to {@link WALL_THICKNESS}
    * (render.ts) when unset, and clamped there (`wallThickness`) to at most
@@ -69,6 +71,16 @@ export interface Wall {
    * cleared by its own opening. Raise the ceiling only alongside that mask.
    */
   thickness?: number;
+  /**
+   * What the line stands for (issue #182). Unset is a full-height `wall`.
+   *
+   * A `railing` is the low edge of a balcony, terrace or gallery: it is drawn
+   * as a thin line, and it is not in the way of anything that happens above
+   * waist height. Lamp light and sunlight carry on over it — a railing across
+   * a balcony used to shade the balcony door behind it all day — and it seals
+   * off no dead space, since what it encloses is open to the air.
+   */
+  kind?: WallKind;
   /**
    * Pinned in place in the editor (issue #191).
    *
@@ -94,7 +106,54 @@ export interface Wall {
   locked?: boolean;
 }
 
-export type OpeningType = "door" | "window";
+/** See {@link Wall.kind}. */
+export type WallKind = "wall" | "railing";
+
+/**
+ * What kind of hole in the building this is.
+ *
+ * `door` and `window` are both holes in a **wall**, which is why they share
+ * almost everything: a centre on a wall line, a length along it, a leaf that
+ * swings or slides across the floor, and a beam of sun swept out of the gap.
+ *
+ * `skylight` is the one that is not (issue #285). It is a
+ * hole in the **ceiling** — a velux, a roof light, a lantern — so it sits in
+ * open floor rather than on a wall line, it has two plan dimensions rather
+ * than one ({@link Opening.width}), and the sun does something else entirely
+ * with it: no gap to sweep a beam out of, but a rectangle of light that lands
+ * away from the opening by however far the light falls on its way down (see
+ * `skylightPatchPolygon`).
+ *
+ * A third *type* rather than a fourth {@link Opening.motion}, and rather than
+ * a top-level element of its own. It is a type because that is the level the
+ * difference lives at — the same reason a window is not a door with the glass
+ * flag set: what changes is where it sits, what the sun does with it, and what
+ * it is drawn as, not how its sash travels. And it stays an {@link Opening}
+ * because the other ninety per cent — an entity that says open or shut, a
+ * blind over it with an entity of its own, colours, icons, gestures, actions,
+ * locking, selection and drag — is exactly what an opening already is. Making
+ * it a top-level array would have meant a second copy of all of it.
+ */
+export type OpeningType = "door" | "window" | "skylight";
+
+/**
+ * Whether this opening is a hole in the **ceiling** rather than in a wall.
+ *
+ * The one question every piece of wall arithmetic in the card has to ask
+ * before it does anything with an opening, because all of it assumes the
+ * opening is a gap in a line: the mask that cuts the wall band, the walls a
+ * lamp's pool passes through, the shade a wall casts, the dead-space test that
+ * reads an opening's centre as "this region has a way in". A skylight sits in
+ * open floor and answers none of those; it is not on a wall to begin with, and
+ * one that happened to be drawn over one would otherwise punch a hole through
+ * it.
+ *
+ * A predicate rather than `o.type === "skylight"` spelled out at each of those
+ * sites, because there are a dozen of them and every one is the same question.
+ */
+export function openingIsSkylight(o: Pick<Opening, "type">): boolean {
+  return o.type === "skylight";
+}
 
 /**
  * How a sliding opening's panels are arranged. Named as a type rather than
@@ -105,12 +164,17 @@ export type OpeningType = "door" | "window";
 export type SliderStyle = "single" | "bypass" | "biparting" | "biparting-bypass" | "converging";
 
 /**
- * A door or window. Positioned by its center point and rotation so it can be
- * dropped onto (and aligned with) a wall, but it is stored independently.
+ * A door, a window, or a skylight. Positioned by its center point and rotation
+ * so it can be dropped onto (and aligned with) a wall, but it is stored
+ * independently. A skylight is in the ceiling and so snaps to no wall — see
+ * {@link OpeningType}.
  */
 export interface Opening {
   id: string;
-  /** The kind of opening: a `door` (single leaf) or a `window` (two leaves / glass). */
+  /**
+   * The kind of opening: a `door` (single leaf), a `window` (two leaves /
+   * glass), or a `skylight` (a hole in the ceiling). See {@link OpeningType}.
+   */
   type: OpeningType;
   /**
    * How the opening moves. `swing` (default) is a hinged door / casement window;
@@ -177,10 +241,45 @@ export interface Opening {
   sashSpan?: number;
   x: number;
   y: number;
-  /** Length along the wall, in virtual units. */
+  /** Length along the wall, in virtual units. For a skylight, its longer plan side. */
   length: number;
   /** Rotation in degrees, 0 = horizontal. */
   angle: number;
+  /**
+   * **Skylights only**: the other plan dimension, across {@link length}, in
+   * virtual units. A wall opening has no such thing — it is a gap in a line,
+   * and the wall's own thickness is all the width it has — but a roof window
+   * is a rectangle you look down on, so it needs both sides.
+   *
+   * Defaults to {@link SKYLIGHT_WIDTH_RATIO} of `length`, which draws the
+   * upright portrait proportions an ordinary velux has. Both sides matter to
+   * the light and not only to the drawing: the patch a skylight lays on the
+   * floor is this rectangle moved, so a long thin roof light lays a long thin
+   * stripe.
+   *
+   * Ignored by doors and windows, which is why it is one field rather than a
+   * `w`/`h` pair replacing `length`: `length` is what every existing plan
+   * already stores, and a skylight's rotation still turns it the same way.
+   */
+  width?: number;
+  /**
+   * **Skylights only**: how high the ceiling is here, as a multiple of an
+   * ordinary one. Default 1.
+   *
+   * Not a distance, because the plan has no unit for height — it is a section
+   * through a house, so nothing in it is measured vertically. What this
+   * actually scales is how far the patch of light **slides** from the skylight
+   * before it reaches the floor, which is the only thing a ceiling height
+   * changes about a plan view: light falling at an angle through a hole two
+   * storeys up lands twice as far across the room as light through the same
+   * hole in an ordinary ceiling.
+   *
+   * So `2` is a stairwell or a double-height living room, and `0.6` a low
+   * attic where the velux is barely above your head. The plan-wide starting
+   * point is {@link FloorplanCardConfig.skylightDrop}; this is the per-skylight
+   * multiplier on it.
+   */
+  ceilingHeight?: number;
   /**
    * Optional entity (e.g. a contact `binary_sensor` or a `cover`) whose state
    * drives whether the opening is drawn open or closed. When unset, doors are
@@ -257,17 +356,26 @@ export interface Opening {
    * exception: a glass-brick panel, a hatch, a serving window with a solid
    * flap, all of which admit light only as far as they are open.
    *
-   * Only the sunlight reads this — it changes nothing about how the opening
-   * is drawn. See {@link openingIsGlazed}.
+   * Only the light reads this — it changes nothing about how the opening is
+   * drawn. All three layers ask the same question through the same helper:
+   * direct sunlight, a lamp's pool, and diffuse
+   * {@link FloorplanCardConfig.ambientDaylight}. See {@link openingIsGlazed},
+   * and {@link openingGlassIsClear} for the roll-motion exception they share.
    */
   glazed?: boolean;
   /**
-   * Whether this opening takes part in the sunlight at all (default `true`).
+   * Whether this opening takes part in the **natural** light at all (default
+   * `true`).
    *
-   * `false` makes it wall as far as the sun is concerned: no patch of its own,
-   * and it stops a beam crossing it like any other stretch of wall. Nothing
-   * else changes — it is still drawn, still tappable, still lets a lamp's pool
-   * through if it is open.
+   * `false` makes it wall as far as the sky is concerned: no patch of its own,
+   * and it stops a beam crossing it like any other stretch of wall. Both
+   * outdoor layers read it — direct {@link FloorplanCardConfig.sunlight} and
+   * diffuse {@link FloorplanCardConfig.ambientDaylight} — because a door the
+   * sun cannot get through is not one the sky gets through either, and one
+   * flag saying "shut to the outside" beats two that have to agree.
+   *
+   * Indoors nothing changes: it is still drawn, still tappable, and still lets
+   * a lamp's pool through if it is open.
    *
    * The case it exists for (issue #177): a **solid front door with no sensor
    * bound**. The plan draws such a door open, because that is the floor-plan
@@ -370,11 +478,15 @@ export interface Opening {
    */
   icon?: string;
   /**
-   * Draw the shutter's icon beside the opening (default true, whenever both
-   * entities are bound). It is what makes the second entity visible at all —
-   * and a control of its own, since tapping it opens the shutter — but on a
-   * dense plan, or one where every window has a shutter, it is a lot of
-   * icons. Turning it off leaves the gestures untouched.
+   * Draw the shutter's icon beside the opening. Defaults to true when the
+   * opening's own entity is bound too: it is what makes the second entity
+   * visible at all — and a control of its own, since tapping it opens the
+   * shutter — but on a dense plan, or one where every window has a shutter, it
+   * is a lot of icons. Turning it off leaves the gestures untouched.
+   *
+   * Defaults to false with the shutter bound alone, where there is no second
+   * entity to reveal; `true` is for the raised roll-up that has left nothing on
+   * the plan but its track line (issue #293).
    */
   showShutterIcon?: boolean;
   /**
@@ -751,7 +863,14 @@ export interface FloorItem {
   rippleColor?: string;
   /** Max ripple ring diameter in pixels. Default 80. */
   rippleSize?: number;
-  /** Direction of the center of the ripple if its width is not 360° in degrees. Default 0° (top). */
+  /**
+   * Direction of the center of the ripple if its width is not 360°, in degrees.
+   * Default 0° (top).
+   *
+   * Measured on the **plan**, not on the screen: it says which way the sensor
+   * looks in the room, so a card drawn with `rotation` turns it with the
+   * drawing (issue #280). Stored unrotated, exactly as the editor shows it.
+   */
   rippleDirection?: number;
   /** Width of the ripple in degrees. Default 360° (all around). */
   rippleWidth?: number;
@@ -991,10 +1110,27 @@ export interface Furniture {
    */
   goToFloor?: "up" | "down";
   /**
+   * What a gesture on this piece does (issue #284): "I would like the option to
+   * select either a floor or the tap actions like we have for areas."
+   *
+   * Same shape as {@link Area.tap_action}, and the same relationship to the
+   * behaviour the piece already had. {@link goToFloor} is to furniture what the
+   * zoom is to a room: the thing a tap does when nothing else is configured. A
+   * `tap_action` replaces it; hold and double-tap are free either way, so a
+   * staircase can keep changing floor on tap and still open more-info on hold.
+   *
+   * An action with no `entity` of its own falls back to this piece's
+   * {@link entity}, exactly as a room's does — so binding a cabinet's contact
+   * sensor once is enough for `more-info` to know what to show.
+   */
+  tap_action?: ActionConfig;
+  hold_action?: ActionConfig;
+  double_tap_action?: ActionConfig;
+  /**
    * Optional entity that makes the drawing live (issue #82) — a soil sensor on
    * a plant, a water temperature sensor on a fish tank, a contact sensor on a
-   * cabinet. Drives {@link stateColor} and {@link activeColor}; furniture has
-   * no click action, so an unbound piece is still just a gray diagram.
+   * cabinet. Drives {@link stateColor} and {@link activeColor}, and stands in
+   * as the target for any action that names none of its own (issue #284).
    */
   entity?: string;
   /**
@@ -1102,6 +1238,18 @@ export interface AreaPoint {
   y: number;
 }
 
+export const RECT_AREA_SIDES = ["top", "right", "bottom", "left"] as const;
+export type RectAreaSide = (typeof RECT_AREA_SIDES)[number];
+export type RectAreaSideWallState = "none" | "wall" | "divider";
+
+/**
+ * Rectangle room side walls: each side can be left alone, turned into a wall,
+ * or drawn as a divider line (toggled by double-clicking the edge in the
+ * editor). The object is optional so polygon room areas and older YAML
+ * remain unchanged.
+ */
+export type RectAreaSideWalls = Partial<Record<RectAreaSide, RectAreaSideWallState>>;
+
 /**
  * A named room polygon, drawn point-by-point in the editor and closed by
  * clicking back on the starting vertex. Distinct from a {@link Floor} (a
@@ -1150,6 +1298,13 @@ export interface Area {
    * {@link filterEntities}.
    */
   haArea?: string;
+  /**
+   * Per-side wall/divider override for rectangle rooms, toggled by
+   * double-clicking an edge in the editor. Persisted like any other field —
+   * the rendered wall/divider comes from this, not from a separate `walls`
+   * entry.
+   */
+  sideWalls?: RectAreaSideWalls;
   /**
    * With `haArea` linked, scope the entity picker (for devices placed inside
    * this polygon) to that HA area's entities. Default true. Has no effect
@@ -1566,6 +1721,28 @@ export interface FloorplanCardConfig extends LovelaceCardConfig {
    */
   rotationLandscape?: number;
   /**
+   * How the plan is drawn (issue #261). `plan` — the default — is the flat
+   * drawing. `iso` shows the same plan as an isometric elevation: the floor
+   * turns by one transform and the walls stand up on it as extruded boxes,
+   * cut at their doors and lowered to a sill at their windows, with the
+   * furniture as blocks under the plan's own glyphs. Display only, exactly
+   * like {@link rotation}: coordinates stay plan coordinates and the editor
+   * always shows the plan as drawn. Anything else is read as `plan`.
+   */
+  projection?: "plan" | "iso";
+  /** Display mode. Takes precedence over the prototype `projection` key. */
+  view?: "2d" | "3d";
+  /** Opacity of standing walls, 0..1. Default 1; ignored in 2D. */
+  wallOpacity?: number;
+  /**
+   * How tall the walls stand under `projection: iso`, in canvas units.
+   * Default `DEFAULT_WALL_HEIGHT` (projection.ts), clamped to
+   * `0..MAX_WALL_HEIGHT`. A real wall is taller than a room is wide and
+   * would hide the room, so this is a maquette's cut-down wall, not a
+   * survey. Ignored on the flat plan.
+   */
+  wallHeight?: number;
+  /**
    * Built-in skin id (issue #122), e.g. `odnetnin`, `pastel`, `tron`. Restyles
    * the whole plan at once — paper, walls, badges, accents — by supplying the
    * fallbacks every element already reads.
@@ -1621,6 +1798,30 @@ export interface FloorplanCardConfig extends LovelaceCardConfig {
    */
   overlayScale?: OverlayScale;
   /**
+   * Move the zoom from room to room (issue #261). `true` puts previous/next
+   * controls on the card and makes the arrow keys walk the rooms — which is
+   * the only way in without a pointer, since a room that merely zooms is not
+   * a tab stop. An object adds a dwell and an explicit tour:
+   *
+   * ```yaml
+   * roomFocus:
+   *   controls: true    # the arrows; on unless turned off
+   *   interval: 10      # seconds per room, omitted for manual only
+   *   rooms: [kitchen]  # visiting order, defaulting to the floor's own
+   * ```
+   *
+   * Cycling never moves the view while someone is using the card: any tap or
+   * key press starts the dwell again. See {@link normalizeRoomFocus}.
+   */
+  roomFocus?: boolean | { controls?: boolean; interval?: number; rooms?: string[] };
+  /**
+   * Under `overlayScale: plan`, size the overlay as though the displayed plan
+   * were at least this wide (px). All overlay measures stop shrinking together.
+   * Unset or zero keeps normal scaling; ignored in fixed-pixel mode.
+   * Below this width labels can overlap as the drawing continues shrinking.
+   */
+  overlayMinWidth?: number;
+  /**
    * Overlay size while zoomed in to a room, as a multiple of its size at full
    * plan (issue #222). Default {@link DEFAULT_ZOOMED_OVERLAY_SCALE} — no
    * change, which is what zooming has always done. Applies to everything in
@@ -1628,7 +1829,7 @@ export interface FloorplanCardConfig extends LovelaceCardConfig {
    * trackers) so a badge and its label scale as one thing, and only while a
    * room is actually zoomed: at full plan it does nothing at all.
    */
-  zoomedOverlayScale?: number;
+  zoomedOverlayScale?: number | "auto";
   /** Canvas background color (CSS / hex). Falls back to the skin's paper, then the card background. */
   background?: string;
   /**
@@ -1685,6 +1886,16 @@ export interface FloorplanCardConfig extends LovelaceCardConfig {
   sunBrightnessMin?: number;
   /** Plan brightness in full daylight, 0-1. Default {@link DEFAULT_SUN_MAX}. */
   sunBrightnessMax?: number;
+  /**
+   * Paint soft diffuse daylight from the visible sky through exterior openings.
+   * This is deliberately independent of direct {@link sunlight}: a north-facing
+   * window can brighten its room even when no direct sun ray reaches that wall.
+   *
+   * V1 derives exterior openings from Area adjacency and clips each wash to its
+   * Area polygon, so complete room Areas are required for reliable topology.
+   * Off by default for backward compatibility.
+   */
+  ambientDaylight?: boolean;
   /**
    * Let the sun in (issue: sunlight through openings). Light arrives from
    * {@link sunBearing}, enters through every window and every open door, and
@@ -1745,6 +1956,34 @@ export interface FloorplanCardConfig extends LovelaceCardConfig {
    */
   sunReach?: number;
   /**
+   * How far a **skylight's** patch of light slides from the skylight itself,
+   * as a fraction of the reach a wall opening gets. Default
+   * {@link SKYLIGHT_DROP} (0.55).
+   *
+   * The one number a roof window needs that a wall one does not. Light coming
+   * through a wall starts at the wall, so where it lands is where it enters;
+   * light coming through a ceiling has a storey to fall through first, so it
+   * lands a pace or two *downwind* of the hole it came through — and how far
+   * is exactly how high the ceiling is over how steep the sun is.
+   *
+   * Stated against the reach rather than in plan units so that both halves of
+   * that come for free. The reach is already a fraction of the plan (so this
+   * is too, and a plan drawn at any scale behaves the same), and it already
+   * carries `1/tan(elevation)` (see {@link sunReachScale}) — which is the very
+   * same factor the drop needs, because a patch of sun is as deep as the
+   * opening is tall over the tangent of the sun's angle either way round. So a
+   * midday sun drops the patch almost straight down, an evening one throws it
+   * across the room, and nothing here has to know the sun's height to do it.
+   *
+   * Raise it for a plan whose skylights read as too directly overhead; lower
+   * it for one whose patches wander further from the roof lights than the
+   * rooms are deep. Per-skylight, {@link Opening.ceilingHeight} multiplies it.
+   *
+   * Coerced and clamped before it reaches a coordinate — see
+   * {@link skylightDropFraction} — for the same reason `sunReach` is.
+   */
+  skylightDrop?: number;
+  /**
    * What a device does when you press it (issue #134). Tapping used to change
    * nothing on screen until the entity itself came back — which on a cover or
    * a slow bulb is long enough to wonder whether the tap registered at all.
@@ -1777,6 +2016,26 @@ export interface FloorplanCardConfig extends LovelaceCardConfig {
   floors?: Floor[];
   /** Id of the floor shown first. Falls back to the first floor. */
   defaultFloor?: string;
+  /**
+   * Where the floor switcher sits on the plan (issue #281), in canvas units —
+   * the point the block of buttons is centred on.
+   *
+   * If unset, it stays pinned to the plan's top-right corner, which is where it
+   * has always been and is right until the plan has something there: *"they often
+   * end up right in the middle of the floor plan on smaller screens."* The
+   * corner is a guess about the drawing, and only the author knows which corner
+   * of their plan is empty.
+   *
+   * Canvas units rather than screen pixels or a percentage of the card, because
+   * the switcher lives inside the plan box and this is a statement about the
+   * *drawing*: put it in the hall, not 12px from an edge whose position depends
+   * on the phone. It follows `rotation` the way every other anchor does, so a
+   * rotated card keeps it in the same corner of the house.
+   *
+   * Off-canvas coordinates are honoured rather than clamped — a plan whose
+   * walls stop short of the canvas has legitimate empty margin to park it in.
+   */
+  floorSwitcher?: { x: number; y: number };
   /** Optional history replay controls and playback defaults. */
   historyReplay?: HistoryReplayConfig;
   walls?: Wall[];

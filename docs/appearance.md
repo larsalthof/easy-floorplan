@@ -193,6 +193,127 @@ window, and a top-hung door is not a thing. A hand-written config may still set
 it on a door and the card draws it honestly — this is about what the editor
 suggests, not what it allows.
 
+## Roof windows
+
+*A velux, a roof light, a lantern — a hole in the ceiling rather than in a wall.*
+
+A skylight is drawn as the rectangle it is, seen from below, with four marks
+each doing a job:
+
+- **the kerb**, a plain rectangle in the wall's own colour, because that is what
+  the hole is lined with and what makes it read as structure rather than as a rug;
+- **dashed diagonals**, the floor-plan convention for anything above the cut
+  plane. They are the only thing that tells a roof light from a rectangular
+  piece of furniture at a glance;
+- **the sash**, which foreshortens as it opens. A velux is hinged at its head
+  and swings out, so from directly below you never see it sweep anywhere — you
+  see it get shorter, until wide open it is the edge-on sliver beside its own
+  hinge. It is the [top-hinged window](#top-hinged-windows) one axis further
+  round, and it is the honest picture: a plan view of a top-hung sash has
+  nowhere else to go;
+- **the hinge line**, thicker, along the head edge, so a shut skylight still
+  says which way it opens. Editor: **Hinged at**.
+
+```yaml
+openings:
+  - id: velux
+    type: skylight
+    x: 450
+    y: 220
+    length: 100      # the long side
+    width: 60        # the short one — a roof window is a rectangle
+    angle: 0
+    entity: cover.velux            # the sash
+    shutterEntity: cover.velux_blind   # the blind, which is what darkens the room
+```
+
+Because it stands in no wall, a skylight snaps to none: click anywhere inside a
+room to drop one, and it stays where you put it. Nothing cuts the wall band for
+it, no lamp's pool passes through it, and it is never the way into a
+[dead space](behavior.md#dead-spaces) — you cannot walk through a ceiling.
+
+### The blind is the switch, not the sash
+
+The thing about a velux that surprises people. It is glass, so `glazed` defaults
+**on** and opening the sash changes nothing about the light: what darkens the
+room under it is the blackout blind. Bind it to `shutterEntity` and the slats
+are drawn across the glass, from the same edge the sash is hung at.
+
+A skylight's blind is the one shutter in the plan you look at **face-on** — a
+wall opening's is edge-on, so however far it has travelled the drawing can only
+say up or down. Here half a blind is visibly half a blind, and the patch of sun
+on the floor narrows to match it — and slides to the edge of the glass the blind
+has not reached, which is where the light is actually coming through.
+
+For the roof **hatch** — a loft door, a smoke vent, a lantern with a solid flap
+— set `glazed: false` and the sash itself becomes what lets the light in.
+
+See [Skylights](lighting.md#skylights) for where that light lands. In the
+[3D view](#3d-view) the same skylight lies at the wall tops and tilts open from
+its hinge, with the blind drawn flat beneath the glass.
+
+## Balcony railings
+
+*"Allow a wall in the floor plan to be marked as belonging to a balcony, rather than being
+treated as a full-height wall."* (issue #182)
+
+Every line the card draws used to be a wall, and walls stop light. A balcony drawn with
+walls came out as a sealed box: its lamp stopped dead at the edge, and the railing stood
+between the sun and the balcony door behind it, so no sunlight ever came in that way.
+
+Set a wall's **Kind** to **Railing** and it is drawn thin, and light carries on over it —
+a lamp's pool spills past the edge, and the sun reaches the door again.
+
+![Before and after: a lamp pool clipped at the balcony edge, then spilling over a thin railing with sunlight entering the balcony door](img/balcony-railing.png)
+
+```yaml
+walls:
+  - { id: rail-west,  x1: 220, y1: 250, x2: 220, y2: 380, kind: railing }
+  - { id: rail-south, x1: 220, y1: 380, x2: 540, y2: 380, kind: railing }
+  - { id: rail-east,  x1: 540, y1: 380, x2: 540, y2: 250, kind: railing }
+```
+
+A railing also seals off no [dead space](behavior.md#dead-spaces): whatever it encloses is
+open to the air. It still takes doors and windows the way a wall does — a gate in a
+railing is a door — and an explicit **Thickness** is scaled down with it, so a railing
+stays thinner than the walls beside it.
+
+## Where the floor switcher sits
+
+The floor buttons have always been pinned to the plan's top-right corner. That is a guess
+about the drawing, and only the author knows whether their plan has anything there — *"they
+often end up right in the middle of the floor plan on smaller screens"* (issue #281).
+
+![The same plan twice: the switcher over the bedroom, and moved down into the empty hall](img/floor-switcher-position.png)
+
+Drag it. In the editor the switcher appears on the canvas as a handle — dimmed while it is
+still in its default corner — and dropping it anywhere stores the point:
+
+```yaml
+type: custom:easy-floorplan-card
+floorSwitcher: { x: 200, y: 152 }
+```
+
+**Canvas units, not screen pixels**, because it is a statement about the drawing: put it in
+the hall, not twelve pixels from an edge whose position depends on the phone. That also
+means it follows `rotation` exactly as devices and labels do, so a plan turned for a wall
+tablet keeps the switcher in the same corner of the house.
+
+A point outside the canvas is kept rather than clamped — a plan whose walls stop short of
+the edge has real margin to park it in.
+
+**Zooming into a room does not carry the switcher with it.** The buttons are how you change
+floor, and a zoom can scale the plan well past the card, so a switcher that travelled with
+the drawing would leave the screen the moment you tapped a room at the far end — with no
+way to change floor until you zoomed back out. It holds its place in the card instead. The
+position you choose is measured against the unzoomed plan, which is the view people
+normally see.
+
+**Project → Floor switcher** carries X and Y fields and a *Back to the corner* button —
+the coordinates because a drag needs a pointer and is aimed by eye, and the button because
+returning to the default is the one thing a drag cannot express. Leave it alone and nothing changes: a plan
+that stores no position emits no positioning at all and renders exactly as it always has.
+
 ## Overlay scale
 
 The card draws in two layers. Walls, doors, furniture and room fills are SVG, scaled from
@@ -287,8 +408,8 @@ sizes (room name `14`, device label `12`):
 So `plan` suits a card rendering down to roughly **two-thirds of its canvas width** on the
 defaults. Below that it trades collision for illegibility, and the sizes have to come up
 to compensate — a `labelSize` of `20`–`24` on a card at half its canvas width lands back
-where the default was. That is a real trade, not a free win: sizes are relative, and
-nothing puts a floor under them.
+where the default was. Alternatively, set `overlayMinWidth` to stop shrinking the
+overlay below a chosen displayed plan width.
 
 So the escape hatch runs both ways. On a card **much** smaller than its canvas, raise the
 sizes rather than switching to `fixed` — the geometry is still right, only the numbers are
@@ -297,6 +418,27 @@ wall tablet showing the plan at full size where a px floor is what keeps text le
 across the room.
 
 The rule of thumb: `plan` is what a plan wants, and the size numbers are yours to set.
+
+### Minimum overlay size
+
+Under **Project → Display → Stop shrinking below**, choose the displayed plan width
+(in pixels) below which badges and labels should stop shrinking. This setting appears
+only with **Canvas units** selected. Zero turns it off.
+
+```yaml
+overlayScale: plan
+overlayMinWidth: 800
+```
+
+On a 980-unit-wide plan, a 14-unit room name scales normally down to an 800px-wide
+plan, then stays about 11.4px tall even in a 505px-wide widget. Badges, readings,
+room names and the other HTML overlays use the same minimum scaling unit, so their
+relative sizes stay consistent. The drawing and label positions continue shrinking.
+
+This trades space for readability: below the threshold, labels and badges can overlap.
+Choose a width that still leaves room for them. The setting is optional, accepts values
+up to 4000px, and has no effect in **Fixed pixels** mode. Rotation uses the displayed
+canvas width; the zoomed badge-size setting still applies independently.
 
 ## Compact header
 
@@ -348,6 +490,166 @@ rotationLandscape: 0   # desktop, wall tablet
 In the editor: **Project → Display**, under *Rotate display*.
 
 Icons and labels stay upright at every angle, so a rotated plan is still readable.
+
+A **bearing** is the exception, and has to be: a ripple's `rippleDirection` says which way
+a sensor looks *in the room*, so it turns with the drawing rather than staying put on
+screen. Otherwise a cone aimed at a wall in the editor pointed at open space once the card
+was rotated (issue #280).
+
+![The same sensor at every rotation: before, the cone stays pointing up the screen while the wall moves; after, it follows the wall](img/ripple-direction-rotation.png)
+
+<a id="isometric-view"></a>
+
+## 3D view
+
+Choose **Project → Display → View → 3D isometric** to see the plan from a corner.
+The editor stays flat; all stored coordinates and entity bindings stay the same.
+
+```yaml
+view: 3d          # 2d is the default
+wallHeight: 60    # canvas units, adjustable from 0 to 400
+wallOpacity: 0.65 # 0 = invisible, 1 = solid (default)
+rotation: 90     # optional: choose the viewing corner
+```
+
+The prototype's `projection: iso` still works. An explicit `view` takes precedence;
+selecting a view in the editor removes the old alias.
+
+- Walls stand above the floor and leave gaps for doors and windows. A rectangle room's
+  own walls stand with them; its dividers stay dashed lines on the floor. Swinging leaves,
+  sliding panels, roll-up curtains and awning windows now stand in those gaps and
+  update with their entities, including partial positions, independent second leaves,
+  and external shutters. The same opening actions work in either view. A panel
+  eases to its new position over half a second, the same travel the flat view's
+  leaf uses, and goes straight there for viewers whose system asks for reduced
+  motion. Scrubbing history steps from state to state without easing.
+- A [roof window](#roof-windows) lies in the roof plane at the wall tops, the
+  rectangle it is, and tilts up out of the roof from its hinge as the sash opens.
+  Its blind is drawn flat under the glass, as far down as the cover reports. It
+  cuts no wall, in this view as in the flat one.
+- Furniture stands as a block with its usual glyph on top. Furniture actions and
+  staircase navigation continue to work.
+- Rooms, light pools, direct sunlight, ambient daylight and background images stay
+  on the floor. Lighting reads the same opening/shutter state in both views,
+  including during history replay. This is floor lighting, not a simulation of
+  light striking the vertical faces.
+- Badges and labels stay upright. Their positions follow the projected floor,
+  including on narrow cards and after rotation. Room zoom reserves space for wall
+  tops, and the canvas includes a margin for wall caps at its edges.
+- Lower **Wall height** or **Wall opacity** to reveal more of a room. Everything
+  standing in the wall plane fades together, doors and shutters included, while
+  glass keeps its own tint and furniture stays solid inside the room. Height remains
+  a fixed 60 canvas units by default while we experiment with different plan sizes.
+  Zero height lays the flat plan on an isometric floor: walls, furniture and opening
+  symbols drawn exactly as the 2D view draws them.
+
+Screenshots from the standalone preview with simulated entities and placeholder
+icons (`wallHeight: 60`, `wallOpacity: 0.65`):
+
+| Doors and windows closed | Doors and windows open |
+| --- | --- |
+| ![3D view with closed doors and windows](img/3d-view-closed.png) | ![3D view with open doors and windows](img/3d-view-open.png) |
+
+![Night view with a lit reading lamp](img/3d-view-night.png)
+
+The repository's own demo plan, with its two roof windows: the blind down on
+one, the hatch open on the other.
+
+![The demo plan in 3D](img/3d-view-demo.png)
+
+A casement window closing, sampled by frame number from the moment its sensor
+changed. The panels ease to the new position rather than arriving in one frame:
+
+![Window sashes easing shut over five frames](img/3d-view-panel-travel.png)
+
+This remains an isometric 2.5D view. Depth ordering uses a
+painter's sort and can misorder diagonal walls or large objects. Furniture still
+uses a shared height. Pin-shaped device markers and per-symbol heights are also
+follow-ups.
+
+For a local preview with simulated entities and view, height, opacity and state
+controls, see [the development preview](../docker/README.md#3d-development-preview).
+
+## Moving between rooms
+
+Tapping a room zooms the plan to it, and tapping it again zooms back out. `roomFocus`
+adds a way to move *between* rooms without aiming at each one:
+
+```yaml
+roomFocus: true        # previous/next controls, and the arrow keys
+```
+
+```yaml
+roomFocus:
+  controls: true       # the arrows; on unless you turn them off
+  interval: 10         # seconds per room before it moves on
+  rooms: [kitchen, living]   # the visiting order, defaulting to the floor's own
+```
+
+The controls step forwards and backwards through the rooms of the floor on show,
+wrapping at both ends. From the whole plan, forwards goes to the first room and
+backwards to the last, so either arrow is a way in. With the controls present the plan
+is also a tab stop: **←/→** (or **↑/↓**) move between rooms and **Escape** returns to the
+whole plan. That is worth having on its own — a room only becomes keyboard-reachable
+when it is given an explicit action, so a room that merely zooms could not be reached
+without a pointer at all.
+
+`interval` turns it into a slow tour for a wall tablet: each room is held for that many
+seconds, then the plan moves on. Any tap or key press starts the count again, so the
+view never moves out from under someone using the card. Set `controls: false` with an
+interval for a display nobody touches. The move itself is the zoom's own transition, so
+it travels rather than cutting — and in the [3D view](#3d-view) it frames each room
+where it is drawn, which makes the tour read as a camera crossing the house.
+
+Two steps of a tour through the demo plan in 3D, taken with the next control:
+
+![Whole plan, then the living room, then the kitchen](img/room-focus-steps.png)
+
+Per-room `zoom` and `zoomedOverlayScale` apply exactly as they do to a tapped room, and
+a device set to [only appear up close](behavior.md#devices-that-only-appear-up-close)
+appears as the tour reaches its room.
+
+### What focusing a room does to the badges
+
+Worth being precise about, because it is not what "zoom in" suggests: by default
+focusing a room does **not** draw the badges any bigger. `zoomedOverlayScale` is `1`,
+which holds the overlay at the size it has at full plan while the drawing grows
+underneath it — so the badges stay put and move *apart*. On the demo plan in a 420px
+card, focusing a room left the badges at 36px and opened the gap between their centres
+from 27px to 36px, in step with the 1.32× zoom. That is why focusing helps a crowded
+plan: more space between the same badges, not larger ones.
+
+If what you wanted from zooming was **bigger icons**, that is `zoomedOverlayScale` — but
+a fixed multiplier is the wrong shape for it. At `2` those badges are drawn 72px wide
+with the same 36px between them, so they overlap *worse* than at full plan. The safe
+ceiling is the room's own zoom factor, and that is fitted per room: the `2` that suits a
+small bathroom overshoots a living room that only zooms 1.3×.
+
+`auto` is that ceiling, named:
+
+```yaml
+zoomedOverlayScale: auto   # badges grow with the room, and no further
+```
+
+Badges then ride the zoom transform instead of being counter-scaled against it, so they
+grow by exactly the factor the room grew by. On the same 420px card:
+
+| | Badge width | Gap between centres | Gap ÷ badge |
+| --- | --- | --- | --- |
+| Full plan | 36px | 27.4px | 0.76 |
+| Focused, default `1` | 36px | 36.1px | 1.00 |
+| Focused, `auto` | 47.4px | 36.1px | 0.76 |
+| Focused, `2` | 72px | 36.1px | 0.50 |
+
+The same 420px card, unfocused and then focused both ways:
+
+![Full plan, focused with the default, and focused with auto](img/zoomed-badge-size.png)
+
+`auto` is a third larger and crowds exactly as the full plan did; `2` is twice the size
+and crowds half again as much. Use `auto` when you zoom to read a device, the default
+`1` when you zoom to separate devices that sit on top of each other, and a fixed
+multiplier when a wall tablet is read from across the room and you want to say precisely
+how big.
 
 ## Styling hooks (card-mod)
 
