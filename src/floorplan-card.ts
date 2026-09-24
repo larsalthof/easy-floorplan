@@ -1155,6 +1155,19 @@ export class FloorplanCard extends LitElement {
       visual = html`<span style="${hiddenStyle}">
         ${this._renderBadge(item, scale, renderHass)}
       </span>`;
+    } else if (labelText && labelPositionOf(item) !== "below") {
+      // A label-only device with its label to one side keeps the badge's
+      // footprint, empty (issue #308): "I would expect the label to keep its
+      // position (and direction of growth), no matter if the badge is shown or
+      // not". The side rules then hang it exactly where they would beside a
+      // badge, which is also where the editor's ghost badge shows it. Below
+      // stays in flow, centred on (x, y), as label-only devices always were.
+      const box = overlayLength(cssNumber(item.size, DEFAULT_ITEM_SIZE), scale);
+      visual = html`<span
+        class="badge-space"
+        aria-hidden="true"
+        style="width:${box};height:${box};"
+      ></span>`;
     }
 
     // Rotated frame: the overlay is HTML, so each anchor is remapped instead
@@ -2705,8 +2718,9 @@ export class FloorplanCard extends LitElement {
 
        Vertically centred on the badge rather than baseline-aligned with it:
        the label is one line and the badge is a circle, so centres are what the
-       eye actually pairs up. .inflow (a label-only device) ignores all of
-       this — with no badge there is no side to sit on. */
+       eye actually pairs up. A label-only device sits beside an empty
+       .badge-space instead (issue #308), so turning the badge off does not
+       move the label or change which way it grows. */
     .item > .label.label-left,
     .item > .label.label-right {
       top: 50%;
@@ -2719,9 +2733,16 @@ export class FloorplanCard extends LitElement {
     .item > .label.label-right {
       left: calc(100% + 4px);
     }
-    /* Label-only items (showIcon: false) have no badge to hang under, so the
-       absolute label would drop to y + 2px on a zero-height item. Put it back
-       in flow so it becomes the item's box and centers on (x, y) as before. */
+    /* The badge's footprint with nothing in it: same box, border included, so
+       a side label lands where it would beside a drawn badge. Not a tap
+       target — it inherits the item's pointer-events: none. */
+    .badge-space {
+      border: var(--fp-skin-badge-border-width, 1.5px) solid transparent;
+    }
+    /* Label-only items (showIcon: false) labelled below have no badge to hang
+       under, so the absolute label would drop to y + 2px on a zero-height
+       item. Put it back in flow so it becomes the item's box and centers on
+       (x, y) as before. */
     .label.inflow {
       position: static;
       transform: none;
