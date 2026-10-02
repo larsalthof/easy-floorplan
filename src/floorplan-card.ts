@@ -165,6 +165,7 @@ import {
   elevationShift,
   wallSolids,
   furnitureSolid,
+  furnitureModelSolids,
   renderIsoSolids,
   FURNITURE_HEIGHT_FRACTION,
   type DisplayFrame,
@@ -817,7 +818,13 @@ export class FloorplanCard extends LitElement {
     // The glyph is drawn in plan coordinates, so it is lifted by the plan-space
     // shift that reads as "up" once rotated and projected.
     const lift = elevationShift(height, rot);
+    const catalog = symbolCatalog(c.symbols);
     for (const f of active.furniture) {
+      const model = catalog[f.type]?.model3d;
+      if (model) {
+        solids.push(...furnitureModelSolids(f, model, map, frame.wallHeight, furnitureTone(f)));
+        continue;
+      }
       solids.push(
         furnitureSolid(
           f,
@@ -1053,7 +1060,10 @@ export class FloorplanCard extends LitElement {
     // Floor-level coordinates would leave the control below the table in 3D.
     const frame = this._frame(c, rot);
     const at = rotatePlanPoint(f.x, f.y, c.width, c.height, rot);
-    const p = projectPlanPoint(at.x, at.y, frame, frame.wallHeight * FURNITURE_HEIGHT_FRACTION);
+    const model = symbolCatalog(c.symbols)[f.type]?.model3d;
+    const height = model ? Math.min(model.size.height, frame.wallHeight)
+      : frame.wallHeight * FURNITURE_HEIGHT_FRACTION;
+    const p = projectPlanPoint(at.x, at.y, frame, height);
     const d = projectedCanvasSize(frame);
     return html`<div
         class="fp-furniture-link"

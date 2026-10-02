@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Furniture symbols can supply an optional `model3d` section for the isometric
+  view. Built-in furniture now uses simple volumes with shelves, legs and open
+  interiors. The 2D view is unchanged; symbols without a valid model retain the
+  previous block rendering. See [the symbol guide](furniture/README.md#optional-3d-models-version-1).
+
 - Ambient daylight (`ambientDaylight: true`) now follows solid wall outlines and
   openings instead of named Area boundaries (#319). Interior partitions block the
   wash, and open or glazed doors can carry it into neighbouring rooms within its

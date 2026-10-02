@@ -13,10 +13,10 @@ async function mount(view: "2d" | "3d", piece: Partial<Furniture>, rotation = 0)
   card.style.width = "400px";
   card.setConfig({
     type: "custom:easy-floorplan-card", width: 500, height: 400, view, rotation,
-    wallHeight: 60, walls: [], openings: [], items: [], texts: [], trackers: [],
+    wallHeight: 100, walls: [], openings: [], items: [], texts: [], trackers: [],
     furniture: [{ id: "table", type: "table", x: 220, y: 170, w: 130, h: 90, ...piece }],
-    areas: [{ id: "room", points: [{ x: 120, y: 80 }, { x: 340, y: 80 },
-      { x: 340, y: 280 }, { x: 120, y: 280 }] }],
+    areas: [{ id: "room", points: [{ x: 120, y: 80 }, { x: 380, y: 80 },
+      { x: 380, y: 320 }, { x: 120, y: 320 }] }],
   } as FloorplanCardConfig);
   card.hass = { states: {}, entities: {} } as FloorplanCard["hass"];
   document.body.append(card);
@@ -30,8 +30,20 @@ async function mount(view: "2d" | "3d", piece: Partial<Furniture>, rotation = 0)
 }
 
 function surfacePoint(card: FloorplanCard, x = 0) {
-  const glyph = card.shadowRoot!.querySelector<SVGGElement>(".fp-furniture")!;
-  return new DOMPoint(x, 0).matrixTransform(glyph.getScreenCTM()!);
+  const glyph = card.shadowRoot!.querySelector<SVGGElement>(".fp-furniture");
+  if (glyph) return new DOMPoint(x, 0).matrixTransform(glyph.getScreenCTM()!);
+  // The model has no flat glyph. Find the actual tabletop (largest top face),
+  // then sample its centre/edge in the browser's transformed SVG geometry.
+  const tops = Array.from(card.shadowRoot!.querySelectorAll<SVGPolygonElement>(
+    '.fp-iso-furniture[data-id="table"] .fp-iso-top'));
+  const area = (p: SVGPolygonElement) => { const b = p.getBBox(); return b.width * b.height; };
+  const top = tops.sort((a, b) => area(b) - area(a))[0]!;
+  const ps = Array.from({ length: top.points.numberOfItems }, (_, i) => top.points.getItem(i));
+  const cx = ps.reduce((n, p) => n + p.x, 0) / ps.length;
+  const cy = ps.reduce((n, p) => n + p.y, 0) / ps.length;
+  const dx = ps[1]!.x - ps[0]!.x, dy = ps[1]!.y - ps[0]!.y;
+  const length = Math.hypot(dx, dy);
+  return new DOMPoint(cx + x * dx / length, cy + x * dy / length).matrixTransform(top.getScreenCTM()!);
 }
 
 async function clickSurface(card: FloorplanCard, x = 0) {

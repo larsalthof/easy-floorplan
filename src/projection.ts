@@ -31,6 +31,7 @@ import type { WallKind } from "./types";
 import { OPENING_ON_WALL_EPS } from "./dead-space";
 import { openingIsSkylight, type OpeningType } from "./types";
 import { joinIsoWalls } from "./projection-joints";
+import type { SymbolModel } from "./symbol-model";
 import { sortIsoSolids } from "./projection-order";
 
 export type PlanProjection = "plan" | "iso";
@@ -199,6 +200,8 @@ export interface IsoSolid {
   /** Explicit raised corners for a tilted opening panel. */
   vertices?: Array<Pt & { z: number }>;
   glazed?: boolean;
+  /** Translucent material for an optional furniture model part. */
+  glass?: boolean;
   /** Adjacent wall chunks share these faces; drawing them shows ribs through transparency. */
   hiddenEdges?: number[];
 }
@@ -372,6 +375,23 @@ export function furnitureSolid(
   return { kind: "furniture", id: f.id, base, z0: 0, z1: height, color, top };
 }
 
+/** Preserve real heights; section furniture at the displayed wall height. */
+export function furnitureModelSolids(
+  f: { id?: string; x: number; y: number; w: number; h: number; angle?: number },
+  model: SymbolModel, map: (x: number, y: number) => Pt, wallHeight: number, color: string
+): IsoSolid[] {
+  const angle = (f.angle ?? 0) * Math.PI / 180, c = Math.cos(angle), s = Math.sin(angle);
+  return model.parts.filter(part => part.z0 < wallHeight).map(part => ({
+    kind: "furniture", id: f.id, color, glass: part.glass,
+    base: part.base.map(([x, y]) => {
+      const dx = (x / model.size.width - 0.5) * f.w;
+      const dy = (y / model.size.depth - 0.5) * f.h;
+      return map(f.x + dx * c - dy * s, f.y + dx * s + dy * c);
+    }),
+    z0: part.z0, z1: Math.min(part.z1, wallHeight),
+  }));
+}
+
 export { solidDepth } from "./projection-order";
 
 const fmt = (v: number) => String(Math.round(v * 100) / 100);
@@ -432,6 +452,7 @@ export function renderIsoSolid(s: IsoSolid): SVGTemplateResult {
   }
   const top = points(s.base.map((p) => elevate(p, s.z1)));
   return svg`<g class=${`fp-iso-solid fp-iso-${s.kind}`} data-id=${id}
+                opacity=${s.glass ? 0.3 : nothing}
                 style=${s.color ? `--fp-iso-color:${s.color}` : nothing}>
     ${faces.map(
       (f) => svg`<polygon class="fp-iso-face" points=${f.pts} /><polygon class="fp-iso-shade" points=${f.pts} opacity=${f.shade} />`
