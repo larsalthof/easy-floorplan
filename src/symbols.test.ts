@@ -94,8 +94,8 @@ describe("the shipped furniture library", () => {
   // the blank fallback box.
   it("answers to every name in the FurnitureType union", () => {
     const union: FurnitureType[] = [
-      "table", "roundTable", "desk", "chair", "sofa", "bed", "wardrobe", "dresser", "tallDresser", "rug",
-      "plant", "fridge", "stove", "sink", "toilet", "stairs", "tv",
+      "table", "roundTable", "desk", "chair", "sofa", "bed", "bunkBed", "wardrobe", "dresser", "tallDresser", "rug",
+      "plant", "indoorPalm", "fridge", "stove", "sink", "toilet", "stairs", "tv",
       "washer", "dryer", "dishwasher", "waterHeater", "airHandler", "bathtub",
       "vanity", "sectional", "fishTank", "piano", "hotTub", "quarterTub",
       "cornerShowerCurved",
