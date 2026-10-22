@@ -29,3 +29,12 @@ it.each([{ view: "2d" }, { wallHeight: 0 }] as Partial<FloorplanCardConfig>[])("
   expect(root.querySelectorAll('.fp-iso-furniture')).toHaveLength(0);
   expect(root.querySelector('.fp-furniture')).not.toBeNull();
 });
+
+it("keeps the configured section height when a tall wall expands the frame", async () => {
+  const root = await mount({ wallHeight: 120, walls: [{ id: "tall", x1: 10, y1: 10, x2: 390, y2: 10, height: 300 }] });
+  expect(root.querySelectorAll('.fp-iso-furniture[data-id="shelf"]')).toHaveLength(6);
+});
+it("renders a newly added 2D-only symbol with the block fallback", async () => {
+  const root = await mount({ furniture: [{ id: "palm", type: "indoorPalm", x: 200, y: 200, w: 40, h: 40 }] });
+  expect(root.querySelectorAll('.fp-iso-furniture[data-id="palm"]')).toHaveLength(1);
+});

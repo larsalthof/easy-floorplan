@@ -10,7 +10,9 @@ describe("optional 3D furniture", () => {
   it("validates every shipped model, with bounded geometry", () => {
     const files = import.meta.glob("../furniture/*.json", { eager: true, import: "default" });
     for (const [file, raw] of Object.entries(files)) {
-      const m = normalizeModel((raw as { model3d: unknown }).model3d);
+      const model3d = (raw as { model3d?: unknown }).model3d;
+      if (model3d === undefined) continue; // Newly added 2D symbols use the block fallback.
+      const m = normalizeModel(model3d);
       expect(m, file).toBeDefined();
       expect(m!.parts.length).toBeLessThanOrEqual(64);
     }
