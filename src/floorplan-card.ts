@@ -3489,7 +3489,7 @@ export class FloorplanCard extends LitElement {
 
 
   private _renderReplayPanel(): TemplateResult {
-    return renderReplayPanel(createReplayPanelProps(this._replayController));
+    return renderReplayPanel({ ...createReplayPanelProps(this._replayController), hass: this.hass });
   }
 
   private _renderFloorSwitcher(

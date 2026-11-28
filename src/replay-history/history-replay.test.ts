@@ -307,6 +307,55 @@ describe("the moment the panel is reporting", () => {
 });
 
 describe("HistoryTimeline", () => {
+  it("passes live naming context from the card through the replay panel", async () => {
+    const card = document.createElement("easy-floorplan-card") as FloorplanCard;
+    card.setConfig({ type: "custom:easy-floorplan-card", width: 400, height: 300,
+      historyReplay: { enabled: true }, walls: [], openings: [], items: [], furniture: [], texts: [] } as FloorplanCardConfig);
+    card.hass = { states: {}, entities: {}, config: { version: "2026.11.0" },
+      formatEntityState: (s: HassEntity) => s.state, formatEntityName: () => "Name" } as unknown as HomeAssistant;
+    document.body.append(card);
+    await card.updateComplete;
+    const panel = card.shadowRoot!.querySelector("easy-floorplan-replay-panel") as HTMLElement & { updateComplete: Promise<unknown>; visible: boolean };
+    panel.visible = true;
+    await panel.updateComplete;
+    const timeline = panel.shadowRoot!.querySelector("easy-floorplan-history-timeline") as HistoryTimeline;
+    expect(timeline.hass).toBe(card.hass);
+    card.remove();
+  });
+
+  it("uses current HA names, updates renamed entities, and retains historical fallbacks", async () => {
+    const timeline = document.createElement("easy-floorplan-history-timeline") as HistoryTimeline;
+    timeline.expanded = true;
+    timeline.startTime = 0;
+    timeline.endTime = 2000;
+    timeline.events = [{ timestamp: 1000, entityId: "light.kitchen", oldState: "off", newState: "on",
+      attributes: { friendly_name: "recorded name" } }];
+    const state = { entity_id: "light.kitchen", state: "on", attributes: { friendly_name: "Legacy name" } } as HassEntity;
+    const formatter = vi.fn(() => "kitchen ceiling");
+    timeline.hass = { states: { "light.kitchen": state }, config: { version: "2026.11.0" },
+      formatEntityState: (s) => s.state, formatEntityName: formatter };
+    document.body.append(timeline);
+    await timeline.updateComplete;
+    const label = () => timeline.shadowRoot!.querySelector(".lane-label")!.textContent!.trim();
+    expect(label()).toBe("kitchen ceiling");
+    expect(formatter).toHaveBeenCalledWith(state);
+    expect(timeline.shadowRoot!.querySelector(".lane-label")!.getAttribute("title")).toContain("kitchen ceiling");
+    // Same events and states: a registry-only rename must invalidate the lanes.
+    timeline.hass = { ...timeline.hass, formatEntityName: () => "New name" };
+    await timeline.updateComplete;
+    expect(label()).toBe("New name");
+    timeline.hass = { ...timeline.hass, config: { version: "2025.10.0" },
+      formatEntityName: () => { throw new Error("Old formatter must not be called"); } };
+    await timeline.updateComplete;
+    expect(label()).toBe("Legacy name");
+    timeline.hass = { ...timeline.hass, states: {} };
+    await timeline.updateComplete;
+    expect(label()).toBe("Recorded name");
+    timeline.events = [{ ...timeline.events[0], attributes: {} }];
+    await timeline.updateComplete;
+    expect(label()).toBe("Light.kitchen");
+  });
+
   it("emits a seek event for click scrubbing", async () => {
     const timeline = document.createElement("easy-floorplan-history-timeline") as HistoryTimeline;
     timeline.events = [

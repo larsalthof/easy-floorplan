@@ -1,3 +1,4 @@
+import type { RenderHass } from "../types";
 import { LitElement, css, html, nothing, type TemplateResult } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
@@ -6,6 +7,7 @@ import { formatReplayInputValue, sliderValueToReplaySpeed } from "./replay-utils
 import { resolveReplayEventColor, type HistoryEventInput } from "./history-service";
 
 export interface ReplayPanelRenderProps {
+  hass?: RenderHass;
   events: HistoryEventInput[];
   startTime: number;
   endTime: number;
@@ -128,6 +130,7 @@ export function createReplayPanelProps(host: ReplayPanelHost): ReplayPanelRender
 export function renderReplayPanel(props: ReplayPanelRenderProps): TemplateResult {
   return html`
     <easy-floorplan-replay-panel
+      .hass=${props.hass}
       .events=${props.events}
       .startTime=${props.startTime}
       .endTime=${props.endTime}
@@ -499,6 +502,7 @@ export class ReplayPanel extends LitElement {
     }
   `;
 
+  @property({ attribute: false }) public hass?: RenderHass;
   @property({ attribute: false }) public events: HistoryEventInput[] = [];
   @property({ type: Number }) public startTime = 0;
   @property({ type: Number }) public endTime = 0;
@@ -706,6 +710,7 @@ export class ReplayPanel extends LitElement {
           </div>
           <div class="replay-timeline-wrap">
             <easy-floorplan-history-timeline
+              .hass=${this.hass}
               .events=${this.events}
               .startTime=${this.startTime}
               .endTime=${this.endTime}

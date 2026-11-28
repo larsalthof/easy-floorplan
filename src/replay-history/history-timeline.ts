@@ -1,3 +1,5 @@
+import { entityNameText } from "../render";
+import type { RenderHass } from "../types";
 import { LitElement, css, html, nothing, unsafeCSS } from "lit";
 import { guard } from "lit/directives/guard.js";
 import { customElement, property, state } from "lit/decorators.js";
@@ -7,6 +9,7 @@ import { SKIN_ACCENT } from "../skins";
 
 @customElement("easy-floorplan-history-timeline")
 export class HistoryTimeline extends LitElement {
+  @property({ attribute: false }) public hass?: RenderHass;
   @property({ attribute: false }) public events: HistoryEventInput[] = [];
   @property({ type: Number }) public startTime = 0;
   @property({ type: Number }) public endTime = 0;
@@ -145,6 +148,10 @@ export class HistoryTimeline extends LitElement {
   }
 
   private _getEntityLabel(event: HistoryEventInput): string {
+    // Names are current registry metadata, even while the state is replayed.
+    // Keep recorded names for entities that no longer exist in live HA.
+    const name = entityNameText(this.hass, event.entityId);
+    if (name) return name;
     const attributes = event.attributes ?? {};
     const friendlyName = typeof attributes.friendly_name === "string" ? attributes.friendly_name : undefined;
     const label = friendlyName?.trim() || event.entityId;
@@ -235,7 +242,7 @@ export class HistoryTimeline extends LitElement {
             <span class="playhead-time">${this._formatTimestamp(this.currentTime)}</span>
           </div>
         </div>
-        ${guard([this.events, this.startTime, this.endTime, this._hidden], () =>
+        ${guard([this.events, this.startTime, this.endTime, this._hidden, this.hass], () =>
           entities.map((entityId, index) => {
           const laneEvents = entityGroups.get(entityId) ?? [];
           const row = index + 1;
