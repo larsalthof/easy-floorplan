@@ -18,6 +18,83 @@ and control your home in 2D or 3D.
 
 https://github.com/user-attachments/assets/ee1d5fb9-e40e-43af-a748-70698e2e455e
 
+<!-- BEGIN TEMPORARY ISSUE 464 TESTING — remove before merging upstream -->
+## Temporary preview: shared floorplans (issue #464)
+
+This branch, `codex/issue-464-shared-floorplan`, adds a read-only reference to
+another Easy Floorplan card. Keep one shared drawing, choose different 2D/3D
+settings on each dashboard, add local entities, or render just one room.
+This is a development preview, not an official release.
+
+### Try this branch in Home Assistant
+
+A GitHub branch URL is not a JavaScript resource. This branch contains source
+code, so build the bundle first. The normal HACS release does not include these
+changes; adding the fork to HACS alone does not select this feature branch.
+
+On a computer with Git and Node.js 24 installed:
+
+```sh
+git clone --branch codex/issue-464-shared-floorplan --single-branch https://github.com/larsalthof/easy-floorplan.git easy-floorplan-464
+cd easy-floorplan-464
+npm ci
+npm run build
+```
+
+1. Copy `dist/easy-floorplan-card.js` to your Home Assistant configuration folder
+   as `www/easy-floorplan-shared-preview.js`.
+2. In **Settings → Dashboards → Resources** (enable Advanced Mode in your user
+   profile if needed), record your existing Easy Floorplan resource URL, then
+   replace it with `/local/easy-floorplan-shared-preview.js?v=464-1`, type
+   **JavaScript module**. For YAML-managed resources, change the corresponding
+   resource entry instead.
+3. Load only one Easy Floorplan bundle. Do not keep the official bundle and this
+   preview registered together: both define the same custom elements. This
+   replacement applies to all Easy Floorplan cards loaded by that browser.
+4. Reload the browser fully. Create a new Manual card using the example below,
+   adjusting the dashboard path, view path, floor ID and room ID to your source.
+   Leave the original drawing on its existing source card.
+
+```yaml
+type: custom:easy-floorplan-card
+source:
+  dashboard: lovelace-home
+  view: house
+  floor_id: floor_main
+  area_id: bedroom
+view: 3d
+items:
+  - id: local_bedroom_temperature
+    kind: sensor
+    entity: sensor.bedroom_temperature
+    x: 720
+    "y": 360
+```
+
+Omit `area_id` to show the selected floor, or omit both `area_id` and `floor_id`
+to share the full plan. Extra `items` use the original plan's coordinates and
+unique IDs; top-level additions require a single selected floor. The visual
+editor lets you change the source reference, default view and local entities.
+See [Shared floorplans](docs/shared-floorplan.md) for multi-floor additions,
+source selection and filtering rules.
+
+Room mode filters geometry and entities **before rendering** in 2D and 3D;
+it is not just a zoom on the full house. HA still returns the complete source
+configuration before filtering. Objects are selected by their anchor position;
+wall segments are clipped to the room polygon. Whole-floor images, roofs and
+floor summaries are omitted in room mode.
+
+To update the preview, pull this branch, rebuild, replace the local file and
+increment the resource URL's `v` value. To stop testing, restore the original
+resource URL and reload the browser. Cards using `source` require this preview
+and will not work with the official release until this feature is included.
+Keep your source card; it remains an ordinary Easy Floorplan card.
+
+This section is temporary and should be removed before the feature is merged
+upstream. Please report test findings with the branch commit, HA version and
+whether you used 2D, 3D or a room-only view.
+<!-- END TEMPORARY ISSUE 464 TESTING -->
+
 ## Features
 
 - **Trace a plan** — load a PDF or image in the editor, calibrate its scale and trace walls over it. See [Tracing over an existing plan](docs/editor.md#tracing-over-an-existing-plan).

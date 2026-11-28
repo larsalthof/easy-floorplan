@@ -949,3 +949,7 @@ furniture:
   - { id: tv_living, type: tv, x: 400, "y": 300, w: 120, h: 10, elevation: { from: 100 } }
   - { id: tv_bedroom, type: tv, x: 800, "y": 300, w: 90, h: 10, elevation: { from: 140 } }
 ```
+
+## Shared floorplan source
+
+Use `source` to read another card’s drawing, override this card’s view, add local entities, or render just one room. See [Shared floorplans](shared-floorplan.md) for configuration and filtering rules.

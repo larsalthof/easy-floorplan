@@ -2233,7 +2233,21 @@ export interface PaletteColor {
   color: string;
 }
 
+/** Read-only reference to another Easy Floorplan card. */
+export interface FloorplanSource {
+  /** Dashboard URL path; omitted for the default dashboard. */
+  dashboard?: string;
+  /** View path (or numeric index for a view with no path). */
+  view: string;
+  /** Zero-based floorplan card index within the view, including nested cards. */
+  card_index?: number;
+  floor_id?: string;
+  /** Floorplan area id, not the Home Assistant area id. */
+  area_id?: string;
+}
+
 export interface FloorplanCardConfig extends LovelaceCardConfig {
+  source?: FloorplanSource;
   type: string;
   title?: string;
   /** Virtual canvas size; the SVG viewBox uses these. Drawing is resolution-independent. */

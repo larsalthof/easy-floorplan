@@ -1,3 +1,4 @@
+import { renderSourceEditor } from "./source-editor";
 import { LitElement, html, css, svg, nothing, type TemplateResult, type PropertyValues } from "lit";
 import { customElement, property, state, query } from "lit/decorators.js";
 import { PROJECT_PAGES, SELECTION_PAGES, type InspectorPage } from "./editor-navigation";
@@ -971,6 +972,10 @@ export class FloorplanCardEditor extends LitElement {
   }
 
   public setConfig(config: FloorplanCardConfig): void {
+    if (config.source) {
+      this._config = structuredClone(config);
+      return;
+    }
     validateYCoordinates(config);
     if (this.isConnected) this._cardIsNew = isNewCard(this);
     const base = { ...emptyConfig(config.type || "custom:easy-floorplan-card"), ...config };
@@ -5330,6 +5335,7 @@ export class FloorplanCardEditor extends LitElement {
   protected render(): TemplateResult {
     if (!this._config) return html`${nothing}`;
     const c = this._config;
+    if (c.source) return renderSourceEditor(c, this.hass, (next) => this._emit(next));
     const floor = this._floor();
     // The canvas follows HA's light/dark mode too, so what you trace over is
     // what the card will show (issue #366).

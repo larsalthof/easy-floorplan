@@ -1,3 +1,4 @@
+import { loadFloorplanSource } from "./floorplan-source";
 import { FurnitureModelCache } from "./furniture-model-cache";
 import { furnitureModelBounds, normalizeElevationFrom } from "./symbol-model";
 import { LitElement, html, css, svg, nothing, type TemplateResult, type PropertyValues } from "lit";
@@ -448,10 +449,14 @@ export class FloorplanCard extends LitElement {
 
   public connectedCallback(): void {
     super.connectedCallback();
+    if (this._sourceConfig) {
+      this._watchSource();
+      if (!this._sourceLoading) void this._loadSource();
+    }
     // The picker's tile draws a sample plan instead of an empty canvas. Only
     // the drawing changes: the config the picker hands to a picked card is
     // its own object, so a new card still starts empty.
-    if (!this._pickerPreview && isInCardPicker(this) && isBlankPlan(this._config)) {
+    if (!this._sourceConfig && !this._pickerPreview && isInCardPicker(this) && isBlankPlan(this._config)) {
       this._pickerPreview = true;
       this.setConfig(pickerPreviewConfig(this._config));
       if (this.hass) this.hass = pickerPreviewHass(this.hass);
@@ -477,7 +482,70 @@ export class FloorplanCard extends LitElement {
     this._syncScreenMediaSubscriptions();
   }
 
+  private _sourceConfig?: FloorplanCardConfig;
+  private _sourceRequest = 0;
+  private _sourceWatchRequest = 0;
+  private _sourceLoading = false;
+  private _sourceUnsubscribe?: () => void;
+  private _sourceConnection?: HomeAssistant["connection"];
+  @state() private _sourceError?: string;
+
+  private async _loadSource(): Promise<void> {
+    if (!this.hass || !this._sourceConfig) return;
+    const request = ++this._sourceRequest;
+    const config = this._sourceConfig;
+    this._sourceLoading = true;
+    this._sourceError = undefined;
+    try {
+      const resolved = await loadFloorplanSource(this.hass, config);
+      if (request !== this._sourceRequest) return;
+      this._applyConfig(resolved);
+      this._activeFloorId = undefined;
+    } catch (error) {
+      if (request === this._sourceRequest) this._sourceError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (request === this._sourceRequest) {
+        this._sourceLoading = false;
+        this.requestUpdate();
+      }
+    }
+  }
+
+  private _watchSource(): void {
+    const connection = this.hass?.connection;
+    if (!this._sourceConfig || !connection || connection === this._sourceConnection) return;
+    this._sourceUnsubscribe?.();
+    this._sourceConnection = connection;
+    const watchRequest = ++this._sourceWatchRequest;
+    // A saved source dashboard invalidates its consumers without polling on
+    // every device state change. Permission errors remain visible on load.
+    void connection.subscribeEvents(() => { void this._loadSource(); }, "lovelace_updated")
+      .then((unsubscribe) => {
+        if (this.isConnected && watchRequest === this._sourceWatchRequest && this._sourceConnection === connection) this._sourceUnsubscribe = unsubscribe;
+        else unsubscribe();
+      }).catch(() => { /* Reopening or retrying the card still reloads its source. */ });
+  }
+
   public setConfig(config: FloorplanCardConfig): void {
+    ++this._sourceRequest;
+    this._sourceLoading = false;
+    this._sourceError = undefined;
+    this._sourceConfig = config?.source ? structuredClone(config) : undefined;
+    this._sourceUnsubscribe?.();
+    this._sourceUnsubscribe = undefined;
+    this._sourceConnection = undefined;
+    ++this._sourceWatchRequest;
+    if (this._sourceConfig) {
+      this._config = undefined;
+      this._watchSource();
+      void this._loadSource();
+      this.requestUpdate();
+      return;
+    }
+    this._applyConfig(config);
+  }
+
+  private _applyConfig(config: FloorplanCardConfig): void {
     // Cheap shape assertions so malformed YAML surfaces as HA's error card
     // instead of a render crash deep inside the SVG.
     if (!config || typeof config !== "object") throw new Error("Invalid configuration");
@@ -597,6 +665,7 @@ export class FloorplanCard extends LitElement {
    * for most updates nothing on this plan moved. Skip those renders entirely.
    */
   protected shouldUpdate(changed: PropertyValues): boolean {
+    if (this._sourceConfig && (!this._config || this.hass?.connection !== this._sourceConnection)) return true;
     const discoveryChanged = this._syncSummaryDiscovery();
     // Anything but a pure hass tick (config change, floor switch, first render).
     if (!(changed.size === 1 && changed.has("hass"))) return true;
@@ -664,6 +733,10 @@ export class FloorplanCard extends LitElement {
    * attribute on the element at all.
    */
   protected willUpdate(changed: PropertyValues): void {
+    if (this._sourceConfig && changed.has("hass")) {
+      this._watchSource();
+      if (!this._config && !this._sourceLoading && !this._sourceError) void this._loadSource();
+    }
     // A later hass from the picker would drop the sample lamp's state.
     if (this._pickerPreview && changed.has("hass") && this.hass) this.hass = pickerPreviewHass(this.hass);
     // Viewer appearance and Reset view can pause or restore moonlight without
@@ -1199,6 +1272,12 @@ export class FloorplanCard extends LitElement {
   }
 
   public disconnectedCallback(): void {
+    ++this._sourceRequest;
+    this._sourceLoading = false;
+    this._sourceUnsubscribe?.();
+    this._sourceUnsubscribe = undefined;
+    this._sourceConnection = undefined;
+    ++this._sourceWatchRequest;
     this._replayController.stopReplayLoop();
     this._openingTween.stop();
     this._rotation.finish();
@@ -2760,6 +2839,8 @@ export class FloorplanCard extends LitElement {
   }
 
   protected render(): TemplateResult {
+    if (this._sourceError) return html`<ha-card><p role="alert">${this._sourceError}</p><button @click=${() => this._loadSource()}>Retry source</button></ha-card>`;
+    if (this._sourceConfig && !this._config) return html`<ha-card><p role="status">Loading floorplan source…</p></ha-card>`;
     if (!this._config) return html`${nothing}`;
     const c = this._displayConfig();
     const lineArt = c.appearance === "line-art";
@@ -2993,7 +3074,7 @@ export class FloorplanCard extends LitElement {
     const roomFocus = normalizeRoomFocus(c.roomFocus);
     const focusRooms = focusOrder(active.areas, roomFocus);
     const zoomedArea = (active.isOutdoor ? floors.flatMap((f) => f.areas) : active.areas)?.find(
-      (a) => a.id === this._zoomedAreaId
+      (a) => a.id === (this._sourceConfig?.source?.area_id ?? this._zoomedAreaId)
     );
     const visiblePanels = this._visibleFloorPanels(active, c, iso, zoomedArea, renderHass);
     const roomZoom = zoomedArea
@@ -3003,10 +3084,10 @@ export class FloorplanCard extends LitElement {
         c.height,
         rot,
         undefined,
-        undefined,
+        this._sourceConfig?.source?.area_id ? Number.MAX_VALUE : undefined,
         // A room may say how close to go; without one the fit decides,
         // exactly as it always has (issue #222).
-        resolveAreaZoom(zoomedArea),
+        this._sourceConfig?.source?.area_id ? undefined : resolveAreaZoom(zoomedArea),
         frame
       )
       : IDENTITY_ZOOM;
