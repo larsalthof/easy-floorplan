@@ -131,6 +131,56 @@ describe("3D card integration", () => {
     expect(points()).not.toBe(midway);
   });
 
+  for (const view of ["2d", "3d"] as const) {
+    const awning = {
+      id: "awning", type: "window" as const, motion: "awning" as const,
+      x: 200, y: 0, angle: 0, length: 80, entity: "binary_sensor.door",
+    };
+    const shape = (root: ShadowRoot) => view === "3d"
+      ? root.querySelector('.fp-iso-panel[data-id="awning"]')?.getAttribute("points")
+      : root.querySelector('.fp-opening polyline')?.getAttribute("points") ?? "closed";
+
+    it(`animates top-hinged windows opening and closing in ${view}`, async () => {
+      const { card, root } = await mount({ view, openings: [awning] });
+      const closed = shape(root);
+      card.hass = hass(true);
+      await card.updateComplete;
+      expect(shape(root)).toBe(closed);
+      await new Promise((r) => setTimeout(r, 150));
+      const opening = shape(root);
+      expect(opening).not.toBe(closed);
+      await settled();
+      const open = shape(root);
+      expect(open).not.toBe(opening);
+      card.hass = hass(false);
+      await card.updateComplete;
+      expect(shape(root)).toBe(open);
+      await new Promise((r) => setTimeout(r, 150));
+      expect(shape(root)).not.toBe(open);
+      expect(shape(root)).not.toBe(closed);
+      await settled();
+      expect(shape(root)).toBe(closed);
+    });
+
+    it(`honours reduced motion for top-hinged windows in ${view}`, async () => {
+      const real = window.matchMedia;
+      window.matchMedia = ((q: string) => q.includes("prefers-reduced-motion")
+        ? ({ matches: true } as MediaQueryList) : real.call(window, q)) as typeof window.matchMedia;
+      try {
+        const { card, root } = await mount({ view, openings: [awning] });
+        const closed = shape(root);
+        card.hass = hass(true);
+        await card.updateComplete;
+        expect(shape(root)).not.toBe(closed);
+        card.hass = hass(false);
+        await card.updateComplete;
+        expect(shape(root)).toBe(closed);
+      } finally {
+        window.matchMedia = real;
+      }
+    });
+  }
+
   it("puts the leaf straight there when the viewer asks for less motion", async () => {
     const real = window.matchMedia;
     window.matchMedia = ((q: string) =>

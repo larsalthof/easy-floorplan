@@ -1,5 +1,5 @@
 /**
- * Eased travel for the standing opening panels (issue #261).
+ * Eased travel for standing panels and flat top-hinged windows (issues #261/#305).
  *
  * The flat view animates its door leaf with a CSS transform transition, and
  * the projected panels cannot do the same: their shape is recomputed from the
@@ -117,7 +117,7 @@ export class AmountTween {
     return value;
   }
 
-  /** Stop asking for frames — the card is going away, or the view is flat. */
+  /** Stop asking for frames when the card goes away or no geometry needs easing. */
   stop(): void {
     if (this._handle !== null) this.frames.cancel(this._handle);
     this._handle = null;

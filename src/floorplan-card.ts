@@ -67,6 +67,7 @@ import {
 import {
   WALL_THICKNESS,
   renderOpening,
+  openingMotion,
   openingHitSize,
   renderWallMask,
   imageFitRatio,
@@ -2758,8 +2759,12 @@ export class FloorplanCard extends LitElement {
     // keeps the flat plan's own walls, furniture and opening symbols, and the
     // standing layer is skipped outright rather than drawn with no height.
     const standing = iso && frame.wallHeight > 0;
-    // Nothing to travel while nothing stands: the leaf's CSS transition has it.
-    if (!standing) this._openingTween.stop();
+    // Top-hinged flat symbols change shape, so CSS transforms cannot animate
+    // them. Share the standing panels' clock, including replay/reduced motion.
+    this._openingTween.setDuration(
+      !replayState.enabled && !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+        ? OPENING_TWEEN_MS : 0
+    );
     const projTransform = planProjectionTransform(frame);
     const dimPad = WALL_THICKNESS + (iso ? frame.wallHeight : 0);
     const effHass = this.hass && renderHass ? { ...this.hass, states: { ...this.hass.states, ...renderHass.states } } : (this.hass ?? (renderHass as unknown as HomeAssistant));
@@ -2824,6 +2829,10 @@ export class FloorplanCard extends LitElement {
     const effectiveOpenings = active.isOutdoor
       ? [...active.openings.filter((o) => !indoorOpenings.some((io) => io.id === o.id)), ...indoorOpenings]
       : [...active.openings, ...indoorOpenings];
+
+    if (!standing && !effectiveOpenings.some((o) => openingMotion(o) === "awning")) {
+      this._openingTween.stop();
+    }
 
     const generatedRoomWalls = active.areas.flatMap((a) => rectAreaSideWalls(a.id, a.points, a.sideWalls ?? {}));
     const roomWallSegments = [...ownWalls, ...indoorWalls, ...generatedRoomWalls];
@@ -3292,7 +3301,10 @@ export class FloorplanCard extends LitElement {
                 standing ? [] : effectiveOpenings,
                 (o, i) => o.id || i,
                 (o) => {
-                  const symbol = renderOpening(o, this._openingStyle(o, renderHass));
+                  const style = this._openingStyle(o, renderHass);
+                  const symbol = renderOpening(o, openingMotion(o) === "awning"
+                    ? { ...style, amount: this._openingTween.value(`${o.id}:leaf`, style.amount ?? (style.open === false ? 0 : 1)) }
+                    : style);
                   // Only an opening that answers gets a hit target — the same test
                   // devices get (issue #134), so an unbound opening is not a button
                   // that does nothing. A shutter-only opening does answer, which is
